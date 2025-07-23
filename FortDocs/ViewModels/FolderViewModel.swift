@@ -20,6 +20,7 @@ class FolderViewModel: ObservableObject {
     }
     
     deinit {
+        cancellables.forEach { $0.cancel() }
         cancellables.removeAll()
     }
     
