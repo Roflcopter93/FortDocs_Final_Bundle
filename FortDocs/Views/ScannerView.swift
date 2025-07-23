@@ -5,7 +5,7 @@ struct ScannerView: View {
     let folder: Folder?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
-    @StateObject private var documentScanner = DocumentScanner.shared
+    @StateObject private var documentScanner = DocumentScanner()
     @StateObject private var cryptoVault = CryptoVault.shared
     @EnvironmentObject private var folderStore: FolderStore
     
@@ -705,15 +705,18 @@ struct DocumentScannerView: UIViewControllerRepresentable {
             }
             
             completion(images)
+            controller.delegate = nil
             controller.dismiss(animated: true)
         }
         
         func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
+            controller.delegate = nil
             controller.dismiss(animated: true)
         }
         
         func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFailWithError error: Error) {
             print("Document scanner failed: \(error)")
+            controller.delegate = nil
             controller.dismiss(animated: true)
         }
     }
