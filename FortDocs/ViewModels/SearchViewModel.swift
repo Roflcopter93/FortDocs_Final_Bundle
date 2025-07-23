@@ -26,6 +26,7 @@ class SearchViewModel: ObservableObject {
     
     deinit {
         searchTask?.cancel()
+        cancellables.forEach { $0.cancel() }
         cancellables.removeAll()
     }
     

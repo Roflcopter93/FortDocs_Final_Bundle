@@ -6,7 +6,6 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 
 class DocumentScanner: ObservableObject {
-    static let shared = DocumentScanner()
     
     @Published var isProcessing = false
     @Published var processingProgress: Double = 0.0
@@ -15,7 +14,7 @@ class DocumentScanner: ObservableObject {
     private let ocrEngine = OCREngine()
     private let documentClassifier = DocumentClassifier()
     
-    private init() {}
+    init() {}
     
     // MARK: - Public Methods
     

@@ -20,6 +20,7 @@ class FolderViewModel: ObservableObject {
     }
     
     deinit {
+        cancellables.forEach { $0.cancel() }
         cancellables.removeAll()
     }
     
@@ -70,6 +71,7 @@ class FolderViewModel: ObservableObject {
         do {
             try context.save()
             loadRootFolders(context: context)
+            SearchIndex.shared.reindexAllDocuments(context: context)
             errorMessage = nil
         } catch {
             errorMessage = "Failed to create folder: \(error.localizedDescription)"
@@ -112,6 +114,7 @@ class FolderViewModel: ObservableObject {
         do {
             try context.save()
             loadRootFolders(context: context)
+            SearchIndex.shared.reindexAllDocuments(context: context)
             errorMessage = nil
         } catch {
             errorMessage = "Failed to move folder: \(error.localizedDescription)"
@@ -137,6 +140,7 @@ class FolderViewModel: ObservableObject {
         do {
             try context.save()
             loadRootFolders(context: context)
+            SearchIndex.shared.reindexAllDocuments(context: context)
             errorMessage = nil
         } catch {
             errorMessage = "Failed to rename folder: \(error.localizedDescription)"

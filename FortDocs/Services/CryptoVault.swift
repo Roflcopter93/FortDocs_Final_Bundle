@@ -175,6 +175,19 @@ class CryptoVault: ObservableObject {
         
         return encryptedData
     }
+
+    // MARK: - Async Wrappers
+
+    func encryptDataAsync(_ data: Data, with key: SymmetricKey, completion: @escaping (Result<Data, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try self.encryptData(data, with: key)
+                DispatchQueue.main.async { completion(.success(result)) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
     
     private func decryptData(_ encryptedData: Data, with key: SymmetricKey) throws -> Data {
         guard encryptedData.count >= nonceSize + tagSize else {
@@ -197,6 +210,17 @@ class CryptoVault: ObservableObject {
         let plainData = try AES.GCM.open(sealedBox, using: key)
         
         return plainData
+    }
+
+    func decryptDataAsync(_ encryptedData: Data, with key: SymmetricKey, completion: @escaping (Result<Data, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try self.decryptData(encryptedData, with: key)
+                DispatchQueue.main.async { completion(.success(result)) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
     }
     
     private func setFileProtection(for url: URL) throws {
