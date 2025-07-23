@@ -1,0 +1,416 @@
+name: FortDocs CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  release:
+    types: [ published ]
+
+env:
+  XCODE_VERSION: '15.2'
+  IOS_SIMULATOR: 'iPhone 15 Pro'
+  IOS_VERSION: '17.2'
+
+jobs:
+  # Job 1: Code Quality and Linting
+  code-quality:
+    name: Code Quality & Linting
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer
+      
+    - name: Cache SwiftLint
+      uses: actions/cache@v4
+      with:
+        path: ~/.swiftlint
+        key: ${{ runner.os }}-swiftlint-${{ hashFiles('**/.swiftlint.yml') }}
+        
+    - name: Install SwiftLint
+      run: |
+        if ! command -v swiftlint &> /dev/null; then
+          brew install swiftlint
+        fi
+        
+    - name: Run SwiftLint
+      run: swiftlint lint --reporter github-actions-logging
+      
+    - name: Check code formatting
+      run: |
+        # Check if code is properly formatted
+        swiftformat --lint FortDocs/ || echo "Code formatting issues found"
+
+  # Job 2: Unit Tests
+  unit-tests:
+    name: Unit Tests
+    runs-on: macos-14
+    needs: code-quality
+    
+    strategy:
+      matrix:
+        destination: 
+          - 'platform=iOS Simulator,name=iPhone 15 Pro,OS=17.2'
+          - 'platform=iOS Simulator,name=iPad Pro (12.9-inch) (6th generation),OS=17.2'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer
+      
+    - name: Cache derived data
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Developer/Xcode/DerivedData
+        key: ${{ runner.os }}-derived-data-${{ hashFiles('**/*.swift') }}
+        restore-keys: |
+          ${{ runner.os }}-derived-data-
+          
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v4
+      with:
+        path: ~/.swiftpm
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
+    - name: Install dependencies
+      run: |
+        # Install any additional dependencies if needed
+        echo "Installing dependencies..."
+        
+    - name: Build for testing
+      run: |
+        xcodebuild build-for-testing \
+          -project FortDocs.xcodeproj \
+          -scheme FortDocs \
+          -destination '${{ matrix.destination }}' \
+          -configuration Debug \
+          -derivedDataPath DerivedData \
+          CODE_SIGNING_ALLOWED=NO
+          
+    - name: Run unit tests
+      run: |
+        xcodebuild test-without-building \
+          -project FortDocs.xcodeproj \
+          -scheme FortDocs \
+          -destination '${{ matrix.destination }}' \
+          -configuration Debug \
+          -derivedDataPath DerivedData \
+          -resultBundlePath TestResults.xcresult \
+          CODE_SIGNING_ALLOWED=NO
+          
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ matrix.destination }}
+        path: TestResults.xcresult
+        
+    - name: Generate test coverage report
+      run: |
+        xcrun xccov view --report --json DerivedData/Logs/Test/*.xcresult > coverage.json
+        xcrun xccov view --report DerivedData/Logs/Test/*.xcresult
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: coverage.json
+        flags: unittests
+        name: codecov-umbrella
+
+  # Job 3: UI Tests
+  ui-tests:
+    name: UI Tests
+    runs-on: macos-14
+    needs: unit-tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer
+      
+    - name: Cache derived data
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Developer/Xcode/DerivedData
+        key: ${{ runner.os }}-derived-data-ui-${{ hashFiles('**/*.swift') }}
+        restore-keys: |
+          ${{ runner.os }}-derived-data-ui-
+          ${{ runner.os }}-derived-data-
+          
+    - name: Boot simulator
+      run: |
+        xcrun simctl boot '${{ env.IOS_SIMULATOR }}' || true
+        xcrun simctl list devices
+        
+    - name: Build for UI testing
+      run: |
+        xcodebuild build-for-testing \
+          -project FortDocs.xcodeproj \
+          -scheme FortDocs \
+          -destination 'platform=iOS Simulator,name=${{ env.IOS_SIMULATOR }},OS=${{ env.IOS_VERSION }}' \
+          -configuration Debug \
+          -derivedDataPath DerivedData \
+          CODE_SIGNING_ALLOWED=NO
+          
+    - name: Run UI tests
+      run: |
+        xcodebuild test-without-building \
+          -project FortDocs.xcodeproj \
+          -scheme FortDocs \
+          -destination 'platform=iOS Simulator,name=${{ env.IOS_SIMULATOR }},OS=${{ env.IOS_VERSION }}' \
+          -configuration Debug \
+          -derivedDataPath DerivedData \
+          -resultBundlePath UITestResults.xcresult \
+          -only-testing:FortDocsUITests \
+          CODE_SIGNING_ALLOWED=NO
+          
+    - name: Upload UI test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ui-test-results
+        path: UITestResults.xcresult
+
+  # Job 4: Security Scan
+  security-scan:
+    name: Security Scan
+    runs-on: macos-14
+    needs: code-quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run security scan
+      run: |
+        # Install security scanning tools
+        brew install semgrep
+        
+        # Run security scan
+        semgrep --config=auto FortDocs/ --json --output=security-report.json || true
+        
+    - name: Upload security report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-report
+        path: security-report.json
+
+  # Job 5: Build Archive (Release only)
+  build-archive:
+    name: Build Archive
+    runs-on: macos-14
+    needs: [unit-tests, ui-tests]
+    if: github.event_name == 'release'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer
+      
+    - name: Import certificates
+      env:
+        BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+        P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      run: |
+        # Create variables
+        CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+        
+        # Import certificate from secrets
+        echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
+        
+        # Create temporary keychain
+        security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        
+        # Import certificate to keychain
+        security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security list-keychain -d user -s $KEYCHAIN_PATH
+        
+    - name: Download provisioning profiles
+      env:
+        PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+      run: |
+        PROVISIONING_PROFILE_PATH=$RUNNER_TEMP/FortDocs.mobileprovision
+        echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode --output $PROVISIONING_PROFILE_PATH
+        
+        # Install provisioning profile
+        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+        cp $PROVISIONING_PROFILE_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+        
+    - name: Build archive
+      run: |
+        xcodebuild archive \
+          -project FortDocs.xcodeproj \
+          -scheme FortDocs \
+          -configuration Release \
+          -destination generic/platform=iOS \
+          -archivePath $RUNNER_TEMP/FortDocs.xcarchive \
+          -allowProvisioningUpdates
+          
+    - name: Export IPA
+      run: |
+        # Create export options plist
+        cat > $RUNNER_TEMP/ExportOptions.plist << EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>method</key>
+          <string>app-store</string>
+          <key>uploadBitcode</key>
+          <false/>
+          <key>uploadSymbols</key>
+          <true/>
+          <key>compileBitcode</key>
+          <false/>
+        </dict>
+        </plist>
+        EOF
+        
+        # Export archive
+        xcodebuild -exportArchive \
+          -archivePath $RUNNER_TEMP/FortDocs.xcarchive \
+          -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
+          -exportPath $RUNNER_TEMP/export \
+          -allowProvisioningUpdates
+          
+    - name: Upload to App Store Connect
+      env:
+        APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      run: |
+        # Create API key file
+        API_KEY_PATH=$RUNNER_TEMP/AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8
+        echo -n "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode --output $API_KEY_PATH
+        
+        # Upload to App Store Connect
+        xcrun altool --upload-app \
+          -f $RUNNER_TEMP/export/FortDocs.ipa \
+          -t ios \
+          --apiKey $APP_STORE_CONNECT_API_KEY_ID \
+          --apiIssuer $APP_STORE_CONNECT_API_ISSUER_ID \
+          --apiKeyPath $API_KEY_PATH
+          
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ios-build
+        path: |
+          ${{ runner.temp }}/export/FortDocs.ipa
+          ${{ runner.temp }}/FortDocs.xcarchive
+        retention-days: 30
+
+  # Job 6: Deploy to TestFlight (Release only)
+  deploy-testflight:
+    name: Deploy to TestFlight
+    runs-on: macos-14
+    needs: build-archive
+    if: github.event_name == 'release'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: ios-build
+        path: build/
+        
+    - name: Deploy to TestFlight
+      env:
+        APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      run: |
+        # Create API key file
+        API_KEY_PATH=$RUNNER_TEMP/AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8
+        echo -n "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode --output $API_KEY_PATH
+        
+        # Upload to TestFlight
+        xcrun altool --upload-app \
+          -f build/FortDocs.ipa \
+          -t ios \
+          --apiKey $APP_STORE_CONNECT_API_KEY_ID \
+          --apiIssuer $APP_STORE_CONNECT_API_ISSUER_ID \
+          --apiKeyPath $API_KEY_PATH
+
+  # Job 7: Notification
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [unit-tests, ui-tests, security-scan]
+    if: always()
+    
+    steps:
+    - name: Notify Slack on success
+      if: success()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#fortdocs-ci'
+        text: '✅ FortDocs CI/CD pipeline completed successfully!'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        
+    - name: Notify Slack on failure
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#fortdocs-ci'
+        text: '❌ FortDocs CI/CD pipeline failed. Please check the logs.'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Job 8: Performance Testing
+  performance-tests:
+    name: Performance Tests
+    runs-on: macos-14
+    needs: unit-tests
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer
+      
+    - name: Run performance tests
+      run: |
+        xcodebuild test \
+          -project FortDocs.xcodeproj \
+          -scheme FortDocs \
+          -destination 'platform=iOS Simulator,name=${{ env.IOS_SIMULATOR }},OS=${{ env.IOS_VERSION }}' \
+          -configuration Release \
+          -only-testing:FortDocsPerformanceTests \
+          CODE_SIGNING_ALLOWED=NO
+          
+    - name: Upload performance results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: performance-results
+        path: |
+          **/*.xcresult
+          **/performance-*.json
+

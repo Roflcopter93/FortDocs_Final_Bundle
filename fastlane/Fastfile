@@ -1,0 +1,426 @@
+# Fastlane Configuration for FortDocs
+# This file contains the fastlane.tools configuration for automated deployment
+
+default_platform(:ios)
+
+platform :ios do
+  # Global variables
+  SCHEME = "FortDocs"
+  PROJECT = "FortDocs.xcodeproj"
+  BUNDLE_ID = "com.fortdocs.app"
+  TEAM_ID = ENV["TEAM_ID"]
+  
+  # Pre-flight checks
+  before_all do
+    ensure_git_status_clean
+    ensure_git_branch(branch: 'main')
+    cocoapods if File.exist?("Podfile")
+  end
+
+  # MARK: - Development Lanes
+
+  desc "Run all tests"
+  lane :test do
+    run_tests(
+      project: PROJECT,
+      scheme: SCHEME,
+      devices: ["iPhone 15 Pro", "iPad Pro (12.9-inch) (6th generation)"],
+      clean: true,
+      code_coverage: true,
+      output_directory: "./test_output",
+      output_types: "html,junit"
+    )
+    
+    # Generate coverage report
+    slather(
+      proj: PROJECT,
+      scheme: SCHEME,
+      output_directory: "./coverage",
+      html: true,
+      show: true
+    )
+  end
+
+  desc "Run security scan"
+  lane :security_scan do
+    # Run SwiftLint for code quality
+    swiftlint(
+      mode: :lint,
+      reporter: "html",
+      output_file: "./reports/swiftlint.html",
+      config_file: ".swiftlint.yml"
+    )
+    
+    # Additional security checks can be added here
+    UI.success("Security scan completed successfully")
+  end
+
+  desc "Build for development"
+  lane :build_dev do
+    increment_build_number(xcodeproj: PROJECT)
+    
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      configuration: "Debug",
+      output_directory: "./build",
+      output_name: "FortDocs-Debug.ipa",
+      clean: true,
+      export_method: "development"
+    )
+  end
+
+  # MARK: - Beta Distribution Lanes
+
+  desc "Deploy to TestFlight"
+  lane :beta do
+    # Ensure we're on the right branch
+    ensure_git_branch(branch: 'main')
+    
+    # Run tests first
+    test
+    
+    # Security scan
+    security_scan
+    
+    # Increment build number
+    increment_build_number(xcodeproj: PROJECT)
+    
+    # Build the app
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      configuration: "Release",
+      output_directory: "./build",
+      output_name: "FortDocs-Beta.ipa",
+      clean: true,
+      export_method: "app-store",
+      export_options: {
+        uploadBitcode: false,
+        uploadSymbols: true,
+        compileBitcode: false,
+        manageAppVersionAndBuildNumber: false
+      }
+    )
+    
+    # Upload to TestFlight
+    upload_to_testflight(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      skip_waiting_for_build_processing: false,
+      changelog: generate_changelog,
+      distribute_external: false,
+      groups: ["Internal Testing"],
+      notify_external_testers: false
+    )
+    
+    # Commit version bump
+    commit_version_bump(
+      message: "Version bump for TestFlight build",
+      xcodeproj: PROJECT
+    )
+    
+    # Tag the release
+    add_git_tag(
+      tag: "beta-#{get_build_number(xcodeproj: PROJECT)}"
+    )
+    
+    # Push to remote
+    push_to_git_remote
+    
+    # Send notification
+    slack(
+      message: "FortDocs Beta #{get_version_number(xcodeproj: PROJECT)} (#{get_build_number(xcodeproj: PROJECT)}) successfully uploaded to TestFlight! 🚀",
+      channel: "#fortdocs-releases",
+      success: true
+    ) if ENV["SLACK_URL"]
+    
+    UI.success("Beta deployment completed successfully!")
+  end
+
+  desc "Deploy external beta to TestFlight"
+  lane :beta_external do
+    # Similar to beta but with external distribution
+    beta
+    
+    # Enable external testing
+    upload_to_testflight(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      skip_submission: true,
+      distribute_external: true,
+      groups: ["External Beta"],
+      notify_external_testers: true,
+      beta_app_review_info: {
+        contact_email: "support@fortdocs.app",
+        contact_first_name: "FortDocs",
+        contact_last_name: "Support",
+        contact_phone: "+1-555-0123",
+        demo_account_name: "demo@fortdocs.app",
+        demo_account_password: "DemoPassword123!",
+        notes: "FortDocs is a privacy-first document vault with military-grade encryption. Please test document scanning, organization, and security features."
+      }
+    )
+    
+    UI.success("External beta deployment completed successfully!")
+  end
+
+  # MARK: - Production Release Lanes
+
+  desc "Deploy to App Store"
+  lane :release do
+    # Ensure we're on the right branch and clean
+    ensure_git_branch(branch: 'main')
+    ensure_git_status_clean
+    
+    # Run comprehensive tests
+    test
+    security_scan
+    
+    # Increment version number for release
+    increment_version_number(xcodeproj: PROJECT)
+    increment_build_number(xcodeproj: PROJECT)
+    
+    # Build the app
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      configuration: "Release",
+      output_directory: "./build",
+      output_name: "FortDocs-Release.ipa",
+      clean: true,
+      export_method: "app-store",
+      export_options: {
+        uploadBitcode: false,
+        uploadSymbols: true,
+        compileBitcode: false,
+        manageAppVersionAndBuildNumber: false
+      }
+    )
+    
+    # Upload to App Store Connect
+    upload_to_app_store(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      force: true,
+      reject_if_possible: true,
+      skip_metadata: false,
+      skip_screenshots: false,
+      submit_for_review: false, # Manual submission for first release
+      automatic_release: false,
+      submission_information: {
+        add_id_info_limits_tracking: true,
+        add_id_info_serves_ads: false,
+        add_id_info_tracks_action: false,
+        add_id_info_tracks_install: false,
+        add_id_info_uses_idfa: false,
+        content_rights_has_rights: true,
+        content_rights_contains_third_party_content: false,
+        export_compliance_platform: 'ios',
+        export_compliance_compliance_required: false,
+        export_compliance_encryption_updated: false,
+        export_compliance_app_type: nil,
+        export_compliance_uses_encryption: true,
+        export_compliance_is_exempt: false,
+        export_compliance_contains_third_party_cryptography: false,
+        export_compliance_contains_proprietary_cryptography: false,
+        export_compliance_available_on_french_store: true
+      }
+    )
+    
+    # Commit version bump
+    commit_version_bump(
+      message: "Version bump for App Store release v#{get_version_number(xcodeproj: PROJECT)}",
+      xcodeproj: PROJECT
+    )
+    
+    # Tag the release
+    add_git_tag(
+      tag: "v#{get_version_number(xcodeproj: PROJECT)}"
+    )
+    
+    # Push to remote
+    push_to_git_remote
+    
+    # Create GitHub release
+    github_release = set_github_release(
+      repository_name: "fortdocs/fortdocs-ios",
+      api_token: ENV["GITHUB_TOKEN"],
+      name: "FortDocs v#{get_version_number(xcodeproj: PROJECT)}",
+      tag_name: "v#{get_version_number(xcodeproj: PROJECT)}",
+      description: generate_changelog,
+      commitish: "main",
+      upload_assets: ["./build/FortDocs-Release.ipa"]
+    ) if ENV["GITHUB_TOKEN"]
+    
+    # Send notification
+    slack(
+      message: "FortDocs v#{get_version_number(xcodeproj: PROJECT)} successfully uploaded to App Store Connect! 🎉\nReady for manual review submission.",
+      channel: "#fortdocs-releases",
+      success: true
+    ) if ENV["SLACK_URL"]
+    
+    UI.success("Production release completed successfully!")
+    UI.important("Don't forget to manually submit for review in App Store Connect!")
+  end
+
+  desc "Submit for App Store review"
+  lane :submit_review do
+    upload_to_app_store(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      skip_binary_upload: true,
+      skip_metadata: true,
+      skip_screenshots: true,
+      submit_for_review: true,
+      automatic_release: false
+    )
+    
+    slack(
+      message: "FortDocs has been submitted for App Store review! 📝",
+      channel: "#fortdocs-releases",
+      success: true
+    ) if ENV["SLACK_URL"]
+    
+    UI.success("App submitted for review successfully!")
+  end
+
+  # MARK: - Utility Lanes
+
+  desc "Update metadata and screenshots"
+  lane :update_metadata do
+    upload_to_app_store(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      skip_binary_upload: true,
+      skip_metadata: false,
+      skip_screenshots: false,
+      submit_for_review: false
+    )
+    
+    UI.success("Metadata and screenshots updated successfully!")
+  end
+
+  desc "Generate changelog from git commits"
+  private_lane :generate_changelog do
+    changelog_from_git_commits(
+      between: [last_git_tag, "HEAD"],
+      pretty: "- %s",
+      date_format: "short",
+      match_lightweight_tag: false,
+      merge_commit_filtering: "exclude_merges"
+    )
+  end
+
+  desc "Setup certificates and provisioning profiles"
+  lane :setup_certificates do
+    match(
+      type: "appstore",
+      app_identifier: BUNDLE_ID,
+      team_id: TEAM_ID,
+      readonly: false,
+      keychain_name: "fastlane_tmp_keychain",
+      keychain_password: ENV["KEYCHAIN_PASSWORD"]
+    )
+    
+    match(
+      type: "development",
+      app_identifier: BUNDLE_ID,
+      team_id: TEAM_ID,
+      readonly: false,
+      keychain_name: "fastlane_tmp_keychain",
+      keychain_password: ENV["KEYCHAIN_PASSWORD"]
+    )
+    
+    UI.success("Certificates and provisioning profiles setup completed!")
+  end
+
+  desc "Clean build artifacts"
+  lane :clean do
+    clear_derived_data
+    clean_build_artifacts
+    
+    # Remove build directory
+    sh("rm -rf ../build") if File.exist?("../build")
+    
+    UI.success("Clean completed successfully!")
+  end
+
+  desc "Validate app before submission"
+  lane :validate do
+    # Run all tests
+    test
+    
+    # Security scan
+    security_scan
+    
+    # Build validation
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      configuration: "Release",
+      skip_package_ipa: true,
+      analyze_build_time: true,
+      export_method: "app-store"
+    )
+    
+    # Validate with App Store
+    upload_to_app_store(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      validate_only: true,
+      skip_metadata: true,
+      skip_screenshots: true
+    )
+    
+    UI.success("Validation completed successfully!")
+  end
+
+  # MARK: - Error Handling
+
+  error do |lane, exception|
+    slack(
+      message: "FortDocs deployment failed in lane '#{lane}': #{exception.message}",
+      channel: "#fortdocs-releases",
+      success: false
+    ) if ENV["SLACK_URL"]
+    
+    UI.error("Deployment failed: #{exception.message}")
+  end
+
+  # MARK: - Post Actions
+
+  after_all do |lane|
+    # Clean up temporary files
+    clean_build_artifacts
+    
+    UI.success("Lane '#{lane}' completed successfully!")
+  end
+end
+
+# MARK: - Custom Actions
+
+def ensure_environment_variables
+  required_vars = [
+    "APP_STORE_CONNECT_API_KEY_PATH",
+    "TEAM_ID",
+    "KEYCHAIN_PASSWORD"
+  ]
+  
+  missing_vars = required_vars.select { |var| ENV[var].nil? || ENV[var].empty? }
+  
+  unless missing_vars.empty?
+    UI.user_error!("Missing required environment variables: #{missing_vars.join(', ')}")
+  end
+end
+
+def setup_keychain
+  keychain_name = "fastlane_tmp_keychain"
+  keychain_password = ENV["KEYCHAIN_PASSWORD"]
+  
+  delete_keychain(name: keychain_name) if File.exist?(File.expand_path("~/Library/Keychains/#{keychain_name}-db"))
+  
+  create_keychain(
+    name: keychain_name,
+    password: keychain_password,
+    default_keychain: true,
+    unlock: true,
+    timeout: 3600,
+    lock_when_sleeps: false
+  )
+end
+
