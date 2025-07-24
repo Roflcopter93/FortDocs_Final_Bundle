@@ -373,7 +373,16 @@ private class KeychainService {
             throw AuthenticationError.keychainError(status)
         }
         
-        return storedData == hashedData
+        return timingSafeEqual(storedData, hashedData)
+    }
+
+    private func timingSafeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        var difference: UInt8 = 0
+        for i in 0..<lhs.count {
+            difference |= lhs[i] ^ rhs[i]
+        }
+        return difference == 0
     }
     
     func hasPIN() -> Bool {

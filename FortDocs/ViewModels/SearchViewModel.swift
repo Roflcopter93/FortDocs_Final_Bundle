@@ -206,26 +206,26 @@ class SearchViewModel: ObservableObject {
         
         for term in searchTerms {
             var termPredicates: [NSPredicate] = []
-            
-            let options: NSComparisonPredicate.Options = caseSensitive ? [] : [.caseInsensitive]
+
+            let comparisonFlag = caseSensitive ? "" : "[c]"
+            let format = wholeWordsOnly ? "MATCHES\(comparisonFlag)" : "CONTAINS\(comparisonFlag)"
             let escaped = NSRegularExpression.escapedPattern(for: term)
-            let format = wholeWordsOnly ? "MATCHES" : "CONTAINS"
             let pattern = wholeWordsOnly ? ".*\\b\(escaped)\\b.*" : escaped
-            
+
             // Search in title
-            termPredicates.append(NSPredicate(format: "title \(format)[\(options.rawValue)] %@", pattern))
-            
+            termPredicates.append(NSPredicate(format: "title \(format) %@", pattern))
+
             // Search in filename
-            termPredicates.append(NSPredicate(format: "fileName \(format)[\(options.rawValue)] %@", pattern))
-            
+            termPredicates.append(NSPredicate(format: "fileName \(format) %@", pattern))
+
             // Search in OCR text if enabled
             if includeOCRText {
-                termPredicates.append(NSPredicate(format: "ocrText \(format)[\(options.rawValue)] %@", pattern))
+                termPredicates.append(NSPredicate(format: "ocrText \(format) %@", pattern))
             }
-            
+
             // Search in tags
-            termPredicates.append(NSPredicate(format: "ANY tags \(format)[\(options.rawValue)] %@", pattern))
-            
+            termPredicates.append(NSPredicate(format: "ANY tags \(format) %@", pattern))
+
             predicates.append(NSCompoundPredicate(orPredicateWithSubpredicates: termPredicates))
         }
         

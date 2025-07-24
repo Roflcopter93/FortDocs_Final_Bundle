@@ -4,6 +4,7 @@ import CoreData
 struct SearchView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var viewModel = SearchViewModel()
+    @ObservedObject private var searchIndex = SearchIndex.shared
     @State private var searchText = ""
     @State private var selectedDocument: Document?
     @State private var showingFilters = false
@@ -34,6 +35,10 @@ struct SearchView: View {
                         searchText: searchText,
                         selectedDocument: $selectedDocument
                     )
+                }
+                if searchIndex.isIndexing {
+                    ProgressView("Indexing...", value: searchIndex.indexingProgress)
+                        .padding()
                 }
             }
             .navigationTitle("Search")

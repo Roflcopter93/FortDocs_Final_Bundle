@@ -25,7 +25,7 @@ class CloudKitService: ObservableObject {
         publicDatabase = container.publicCloudDatabase
         
         checkCloudKitAvailability()
-        setupSubscriptions()
+        Task { await setupSubscriptions() }
     }
     
     // MARK: - CloudKit Availability
@@ -206,12 +206,17 @@ class CloudKitService: ObservableObject {
             }
             
             // Upload local folders not in remote
+            var uploadTasks: [Task<Void, Error>] = []
             for (localID, localFolder) in localDict {
                 if remoteDict[localID] == nil {
-                    Task {
+                    uploadTasks.append(Task {
                         try await self.uploadFolder(localFolder)
-                    }
+                    })
                 }
+            }
+
+            for task in uploadTasks {
+                do { try await task.value } catch { print("Upload folder failed: \(error)") }
             }
             
             do {
@@ -246,12 +251,17 @@ class CloudKitService: ObservableObject {
             }
             
             // Upload local documents not in remote
+            var docTasks: [Task<Void, Error>] = []
             for (localID, localDocument) in localDict {
                 if remoteDict[localID] == nil {
-                    Task {
+                    docTasks.append(Task {
                         try await self.uploadDocument(localDocument)
-                    }
+                    })
                 }
+            }
+
+            for task in docTasks {
+                do { try await task.value } catch { print("Upload document failed: \(error)") }
             }
             
             do {
@@ -409,14 +419,12 @@ class CloudKitService: ObservableObject {
     
     // MARK: - Subscriptions
     
-    private func setupSubscriptions() {
-        Task {
-            do {
-                try await createDocumentSubscription()
-                try await createFolderSubscription()
-            } catch {
-                print("Failed to set up subscriptions: \(error)")
-            }
+    private func setupSubscriptions() async {
+        do {
+            try await createDocumentSubscription()
+            try await createFolderSubscription()
+        } catch {
+            print("Failed to set up subscriptions: \(error)")
         }
     }
     
