@@ -692,9 +692,7 @@ struct IndexStatistics {
     let indexedDocuments: Int
     let totalIndexEntries: Int
     let lastUpdate: Date?
-}moveDocumentFromIndex(document)
-        indexDocument(document)
-    }
+}
     
     func clearAllIndexes() {
         // This will be fully implemented in phase 6
@@ -723,5 +721,3 @@ struct IndexStatistics {
             print("Failed to reindex documents: \(error)")
         }
     }
-}
-
