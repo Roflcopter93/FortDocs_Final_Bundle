@@ -12,6 +12,7 @@ class SyncManager: ObservableObject {
     @Published var pendingChanges = 0
     @Published var lastSyncDate: Date?
     @Published var conflicts: [SyncConflict] = []
+    @Published var syncProgress: Double = 0.0
     
     private let persistenceController = PersistenceController.shared
     private let cloudKitService = CloudKitService.shared
@@ -21,6 +22,7 @@ class SyncManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var syncTimer: Timer?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    private var syncTask: Task<Void, Never>?
     
     // Sync configuration
     private let syncInterval: TimeInterval = 300 // 5 minutes
@@ -104,7 +106,8 @@ class SyncManager: ObservableObject {
     private func performAutoSync() {
         guard isOnline && syncState != .syncing else { return }
         
-        Task {
+        syncTask?.cancel()
+        syncTask = Task {
             await performSync(isManual: false)
         }
     }
@@ -117,7 +120,8 @@ class SyncManager: ObservableObject {
             self?.endBackgroundTask()
         }
         
-        Task {
+        syncTask?.cancel()
+        syncTask = Task {
             await performSync(isManual: false)
             endBackgroundTask()
         }
@@ -133,23 +137,29 @@ class SyncManager: ObservableObject {
     private func performSync(isManual: Bool) async {
         await MainActor.run {
             syncState = .syncing
+            syncProgress = 0.0
         }
-        
+
         do {
             // Step 1: Upload pending local changes
             try await uploadPendingChanges()
-            
+            await MainActor.run { syncProgress = 0.33 }
+
             // Step 2: Download remote changes
             try await downloadRemoteChanges()
-            
+            await MainActor.run { syncProgress = 0.66 }
+
             // Step 3: Resolve conflicts
             try await resolveConflicts()
-            
+
+            await MainActor.run { syncProgress = 0.9 }
+
             // Step 4: Update sync metadata
             updateSyncMetadata()
-            
+
             await MainActor.run {
                 syncState = .completed
+                syncProgress = 1.0
                 lastSyncDate = Date()
                 
                 if isManual {
@@ -161,6 +171,7 @@ class SyncManager: ObservableObject {
         } catch {
             await MainActor.run {
                 syncState = .error(error.localizedDescription)
+                syncProgress = 0.0
             }
             
             print("Sync failed: \(error)")
@@ -175,7 +186,8 @@ class SyncManager: ObservableObject {
     private func syncWhenOnline() {
         guard isOnline && pendingChanges > 0 else { return }
         
-        Task {
+        syncTask?.cancel()
+        syncTask = Task {
             await performSync(isManual: false)
         }
     }

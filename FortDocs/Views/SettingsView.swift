@@ -4,10 +4,12 @@ import LocalAuthentication
 struct SettingsView: View {
     @EnvironmentObject private var authService: AuthenticationService
     @EnvironmentObject private var folderStore: FolderStore
+    @ObservedObject private var syncManager = SyncManager.shared
     @State private var showingChangePIN = false
     @State private var showingAbout = false
     @State private var showingExportData = false
     @State private var showingDeleteAllData = false
+    @State private var showingSyncComplete = false
     @State private var biometricsEnabled = false
 
     private var autoLockDescription: String {
@@ -147,6 +149,9 @@ struct SettingsView: View {
                     Button("Sync Now") {
                         syncNow()
                     }
+                    if syncManager.syncState == .syncing {
+                        ProgressView(value: syncManager.syncProgress)
+                    }
                 }
                 
                 // App Section
@@ -242,6 +247,12 @@ struct SettingsView: View {
         } message: {
             Text("This will permanently delete all your documents and folders. This action cannot be undone.")
         }
+        .alert("Sync Completed", isPresented: $showingSyncComplete) {
+            Button("OK", role: .cancel) { }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .syncCompleted)) { _ in
+            showingSyncComplete = true
+        }
     }
     
     private func toggleBiometrics(_ enabled: Bool) {
@@ -264,8 +275,10 @@ struct SettingsView: View {
     }
     
     private func syncNow() {
-        // Trigger manual sync
-        print("Manual sync triggered")
+        Task {
+            await SyncManager.shared.performManualSync()
+            showingSyncComplete = true
+        }
     }
     
     private func deleteAllData() {

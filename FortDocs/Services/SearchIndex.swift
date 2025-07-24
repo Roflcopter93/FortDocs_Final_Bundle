@@ -39,13 +39,13 @@ class SearchIndex: ObservableObject {
     private func handleCoreDataChange(_ notification: Notification) {
         guard let context = notification.object as? NSManagedObjectContext else { return }
         
+        var tasks: [Task<Void, Never>] = []
+
         // Handle inserted documents
         if let insertedObjects = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject> {
             for object in insertedObjects {
                 if let document = object as? Document {
-                    Task {
-                        await indexDocument(document)
-                    }
+                    tasks.append(Task { await indexDocument(document) })
                 }
             }
         }
@@ -54,9 +54,7 @@ class SearchIndex: ObservableObject {
         if let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> {
             for object in updatedObjects {
                 if let document = object as? Document {
-                    Task {
-                        await updateDocumentIndex(document)
-                    }
+                    tasks.append(Task { await updateDocumentIndex(document) })
                 }
             }
         }
@@ -66,12 +64,12 @@ class SearchIndex: ObservableObject {
             for object in deletedObjects {
                 if let document = object as? Document,
                    let documentID = document.id {
-                    Task {
-                        await removeDocumentFromIndex(documentID)
-                    }
+                    tasks.append(Task { await removeDocumentFromIndex(documentID) })
                 }
             }
         }
+
+        Task { await Task.whenAllComplete(tasks) }
     }
     
     // MARK: - Initial Index Setup
@@ -694,31 +692,46 @@ struct IndexStatistics {
     let totalIndexEntries: Int
     let lastUpdate: Date?
 }
-    
-    func clearAllIndexes() {
-        // This will be fully implemented in phase 6
+
+extension SearchIndex {
+    func clearAllIndexes() async {
         print("Clearing all search indexes")
-        
-        CSSearchableIndex.default().deleteAllSearchableItems { error in
-            if let error = error {
-                print("Failed to clear search indexes: \(error)")
+
+        await withCheckedContinuation { continuation in
+            CSSearchableIndex.default().deleteAllSearchableItems { error in
+                if let error = error {
+                    print("Failed to clear search indexes: \(error)")
+                }
+                continuation.resume()
             }
         }
+
+        let context = persistenceController.newBackgroundContext()
+        await context.perform {
+            let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
+            if let entries = try? context.fetch(request) {
+                for entry in entries { context.delete(entry) }
+            }
+            try? context.save()
+        }
     }
-    
-    func reindexAllDocuments(context: NSManagedObjectContext) {
-        // This will be fully implemented in phase 6
+
+    func reindexAllDocuments() async {
         print("Reindexing all documents")
-        
-        let request = Document.fetchAll()
-        
+
+        let context = persistenceController.newBackgroundContext()
+
         do {
-            let documents = try context.fetch(request)
-            
+            let documents: [Document] = try await context.perform {
+                let request = Document.fetchAll()
+                return try context.fetch(request)
+            }
+
             for document in documents {
-                indexDocument(document)
+                await indexDocument(document)
             }
         } catch {
             print("Failed to reindex documents: \(error)")
         }
     }
+}
