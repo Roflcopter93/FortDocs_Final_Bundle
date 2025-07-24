@@ -194,18 +194,8 @@ fastlane release
 - Attribution requirements fulfilled
 - Open source component tracking
 
-### Intellectual Property
-- Original codebase with clear ownership
-- Trademark and copyright protection
-- Patent considerations addressed
-- Export compliance for encryption
-
-## Contact and Support
-
-**Developer**: Manus AI  
-**Support Email**: support@fortdocs.app  
-**Website**: https://fortdocs.app  
-**Privacy Policy**: https://fortdocs.app/privacy  
+### Intellectual Property of rep0mancer
+  
 
 ---
 
