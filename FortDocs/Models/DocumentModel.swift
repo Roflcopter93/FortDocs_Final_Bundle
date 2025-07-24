@@ -131,10 +131,10 @@ extension Document {
     // MARK: - File Management
     
     func getDecryptedFileURL() throws -> URL {
-        guard let cryptoVault = CryptoVault.shared else {
-            throw DocumentError.cryptoVaultNotAvailable
-        }
-        
+        // Directly access the shared vault. If this ever becomes optional,
+        // callers can throw `cryptoVaultNotAvailable` when `shared` is nil.
+        let cryptoVault = CryptoVault.shared
+
         let encryptedURL = URL(fileURLWithPath: encryptedFilePath)
         return try cryptoVault.getDecryptedFileURL(for: encryptedURL)
     }
