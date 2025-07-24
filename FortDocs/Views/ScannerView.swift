@@ -438,9 +438,9 @@ struct ProcessingResultsView: View {
         // Clean up temp file
         try? FileManager.default.removeItem(at: tempURL)
         
-        // Set file size
+        // Set file size and encrypted path
         document.fileSize = Int64(imageData.count)
-        document.fileURL = imageURL
+        document.encryptedFilePath = imageURL.path
         
         // Save context
         try viewContext.save()

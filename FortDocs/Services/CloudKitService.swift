@@ -374,11 +374,10 @@ class CloudKitService: ObservableObject {
             record["folder"] = folderReference
         }
         
-        // Upload file asset
-        if let fileURL = document.fileURL {
-            let asset = CKAsset(fileURL: fileURL)
-            record["fileAsset"] = asset
-        }
+        // Upload file asset using encrypted file path
+        let fileURL = URL(fileURLWithPath: document.encryptedFilePath)
+        let asset = CKAsset(fileURL: fileURL)
+        record["fileAsset"] = asset
         
         try await privateDatabase.save(record)
     }
@@ -398,9 +397,9 @@ class CloudKitService: ObservableObject {
             // Write encrypted file
             try CryptoVault.shared.encryptData(data, to: localURL)
             
-            // Update document with local URL
+            // Update document with local path
             await MainActor.run {
-                document.fileURL = localURL
+                document.encryptedFilePath = localURL.path
             }
             
         } catch {

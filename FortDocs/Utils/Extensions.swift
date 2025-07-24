@@ -320,7 +320,8 @@ extension Document {
     }
     
     func getDecryptedFileURL() throws -> URL {
-        return try CryptoVault.shared.getDecryptedFileURL(for: fileURL)
+        let encryptedURL = URL(fileURLWithPath: encryptedFilePath)
+        return try CryptoVault.shared.getDecryptedFileURL(for: encryptedURL)
     }
 }
 
