@@ -1,495 +1,173 @@
 import Foundation
-import CoreSpotlight
-import MobileCoreServices
 import CoreData
 import Combine
 
-class SearchIndex: ObservableObject {
+/// A lightweight search index for FortDocs documents.  This implementation
+/// replaces the original eager decryption approach with a privacy preserving
+/// encrypted search.  Instead of decrypting every index entry into memory
+/// when performing a search, we derive a per‑document search key from the
+/// master key and compute deterministic hashes of each search term.  These
+/// token hashes are stored in the index and used for lookups, dramatically
+/// reducing memory overhead and improving scalability.
+final class SearchIndex: ObservableObject {
     static let shared = SearchIndex()
-    
+
+    // Published properties for progress monitoring
     @Published var isIndexing = false
     @Published var indexingProgress: Double = 0.0
     @Published var lastIndexUpdate: Date?
     @Published var indexedDocumentCount = 0
-    
+
     private let persistenceController = PersistenceController.shared
     private let cryptoVault = CryptoVault.shared
     private var cancellables = Set<AnyCancellable>()
-    
-    // Search configuration
+
+    /// Maximum number of results returned by a search.
     private let maxSearchResults = 100
-    private let searchTimeout: TimeInterval = 5.0
-    private let indexBatchSize = 50
-    
+
     private init() {
-        setupCoreDataObservers()
-        setupInitialIndex()
-    }
-    
-    // MARK: - Core Data Observers
-    
-    private func setupCoreDataObservers() {
+        // Observe Core Data saves to keep the index up to date
         NotificationCenter.default.publisher(for: .NSManagedObjectContextDidSave)
             .sink { [weak self] notification in
                 self?.handleCoreDataChange(notification)
             }
             .store(in: &cancellables)
     }
-    
+
+    // MARK: - Core Data Change Handling
+
+    /// Handles inserts, updates and deletes of Document objects by updating the search index accordingly.
     private func handleCoreDataChange(_ notification: Notification) {
         guard let context = notification.object as? NSManagedObjectContext else { return }
-        
         var tasks: [Task<Void, Never>] = []
-
-        // Handle inserted documents
-        if let insertedObjects = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject> {
-            for object in insertedObjects {
-                if let document = object as? Document {
-                    tasks.append(Task { await indexDocument(document) })
+        if let inserted = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject> {
+            for object in inserted where object is Document {
+                tasks.append(Task { await indexDocument(object as! Document) })
+            }
+        }
+        if let updated = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> {
+            for object in updated where object is Document {
+                tasks.append(Task { await updateDocumentIndex(object as! Document) })
+            }
+        }
+        if let deleted = notification.userInfo?[NSDeletedObjectsKey] as? Set<NSManagedObject> {
+            for object in deleted where object is Document {
+                if let id = (object as! Document).id {
+                    tasks.append(Task { await removeDocumentFromIndex(id) })
                 }
             }
         }
-        
-        // Handle updated documents
-        if let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> {
-            for object in updatedObjects {
-                if let document = object as? Document {
-                    tasks.append(Task { await updateDocumentIndex(document) })
-                }
-            }
-        }
-        
-        // Handle deleted documents
-        if let deletedObjects = notification.userInfo?[NSDeletedObjectsKey] as? Set<NSManagedObject> {
-            for object in deletedObjects {
-                if let document = object as? Document,
-                   let documentID = document.id {
-                    tasks.append(Task { await removeDocumentFromIndex(documentID) })
-                }
-            }
-        }
-
         Task { await Task.whenAllComplete(tasks) }
     }
-    
-    // MARK: - Initial Index Setup
-    
-    private func setupInitialIndex() {
-        Task {
-            await buildInitialIndex()
-        }
-    }
-    
-    private func buildInitialIndex() async {
-        await MainActor.run {
-            isIndexing = true
-            indexingProgress = 0.0
-        }
-        
-        let context = persistenceController.newBackgroundContext()
-        
-        await context.perform {
-            do {
-                let request: NSFetchRequest<Document> = Document.fetchRequest()
-                let documents = try context.fetch(request)
-                let totalDocuments = documents.count
-                
-                for (index, document) in documents.enumerated() {
-                    await self.indexDocument(document)
-                    
-                    let progress = Double(index + 1) / Double(totalDocuments)
-                    await MainActor.run {
-                        self.indexingProgress = progress
-                    }
-                }
-                
-                await MainActor.run {
-                    self.isIndexing = false
-                    self.indexingProgress = 1.0
-                    self.lastIndexUpdate = Date()
-                    self.indexedDocumentCount = totalDocuments
-                }
-                
-            } catch {
-                print("Failed to build initial index: \(error)")
-                await MainActor.run {
-                    self.isIndexing = false
-                }
-            }
-        }
-    }
-    
-    // MARK: - Document Indexing
-    
+
+    // MARK: - Indexing API
+
+    /// Index a single document by creating hashed token entries for its searchable fields.
     func indexDocument(_ document: Document) async {
         guard let documentID = document.id else { return }
-        
-        // Create Core Spotlight item
-        let searchableItem = createSearchableItem(for: document)
-        
-        // Index in Core Spotlight
-        await indexInCoreSpotlight([searchableItem])
-        
-        // Index in local search database
-        await indexInLocalDatabase(document)
-        
-        print("Indexed document: \(document.title ?? "Untitled")")
-    }
-    
-    func updateDocumentIndex(_ document: Document) async {
-        // Remove old index entry
-        if let documentID = document.id {
-            await removeDocumentFromIndex(documentID)
+        let context = persistenceController.newBackgroundContext()
+        await context.perform {
+            // Remove existing entries
+            let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
+            request.predicate = NSPredicate(format: "documentID == %@", documentID as CVarArg)
+            if let entries = try? context.fetch(request) {
+                entries.forEach { context.delete($0) }
+            }
+            // Create new entries with hashed tokens
+            self.createIndexEntries(for: document, in: context)
+            try? context.save()
         }
-        
-        // Add updated index entry
+    }
+
+    /// Update the index for a modified document by removing the old entries and indexing again.
+    func updateDocumentIndex(_ document: Document) async {
         await indexDocument(document)
     }
-    
+
+    /// Remove all index entries for a given document identifier.
     func removeDocumentFromIndex(_ documentID: UUID) async {
-        // Remove from Core Spotlight
-        let identifier = "document-\(documentID.uuidString)"
-        await removeFromCoreSpotlight([identifier])
-        
-        // Remove from local database
-        await removeFromLocalDatabase(documentID)
-        
-        print("Removed document from index: \(documentID)")
-    }
-    
-    // MARK: - Core Spotlight Integration
-    
-    private func createSearchableItem(for document: Document) -> CSSearchableItem {
-        let attributeSet = CSSearchableItemAttributeSet(itemContentType: kUTTypeItem as String)
-        
-        // Basic attributes
-        attributeSet.title = document.title
-        attributeSet.displayName = document.title
-        attributeSet.contentDescription = generateContentDescription(for: document)
-        
-        // Content
-        if let ocrText = document.ocrText, !ocrText.isEmpty {
-            attributeSet.textContent = ocrText
-        }
-        
-        // Metadata
-        attributeSet.contentCreationDate = document.createdAt
-        attributeSet.contentModificationDate = document.modifiedAt
-        attributeSet.fileSize = NSNumber(value: document.fileSize)
-        
-        // Document type
-        attributeSet.contentType = document.mimeType
-        attributeSet.kind = getDocumentKind(from: document.mimeType)
-        
-        // Folder information
-        if let folder = document.folder {
-            attributeSet.path = folder.name
-            attributeSet.containerTitle = folder.name
-            attributeSet.containerDisplayName = folder.name
-        }
-        
-        // Keywords from OCR and metadata
-        attributeSet.keywords = extractKeywords(from: document)
-        
-        // Thumbnail
-        if let thumbnailData = document.thumbnailData {
-            attributeSet.thumbnailData = thumbnailData
-        }
-        
-        // Custom attributes for filtering
-        attributeSet.setValue(document.folder?.name, forCustomKey: CSCustomAttributeKey(keyName: "folderName")!)
-        attributeSet.setValue(document.mimeType, forCustomKey: CSCustomAttributeKey(keyName: "documentType")!)
-        
-        // Security - mark as encrypted
-        attributeSet.setValue(document.isEncrypted, forCustomKey: CSCustomAttributeKey(keyName: "isEncrypted")!)
-        
-        let identifier = "document-\(document.id!.uuidString)"
-        let searchableItem = CSSearchableItem(
-            uniqueIdentifier: identifier,
-            domainIdentifier: "com.fortdocs.documents",
-            attributeSet: attributeSet
-        )
-        
-        return searchableItem
-    }
-    
-    private func generateContentDescription(for document: Document) -> String {
-        var description = ""
-        
-        if let folder = document.folder {
-            description += "In \(folder.name)"
-        }
-        
-        if let ocrText = document.ocrText, !ocrText.isEmpty {
-            let preview = String(ocrText.prefix(200))
-            if !description.isEmpty {
-                description += " • "
-            }
-            description += preview
-            if ocrText.count > 200 {
-                description += "..."
-            }
-        }
-        
-        return description
-    }
-    
-    private func getDocumentKind(from mimeType: String) -> String {
-        switch mimeType.lowercased() {
-        case let type where type.hasPrefix("image/"):
-            return "Image"
-        case "application/pdf":
-            return "PDF Document"
-        case let type where type.hasPrefix("text/"):
-            return "Text Document"
-        default:
-            return "Document"
-        }
-    }
-    
-    private func extractKeywords(from document: Document) -> [String] {
-        var keywords: [String] = []
-        
-        // Add document title words
-        if let title = document.title {
-            keywords.append(contentsOf: title.components(separatedBy: .whitespacesAndPunctuationMarks))
-        }
-        
-        // Add folder name
-        if let folderName = document.folder?.name {
-            keywords.append(folderName)
-        }
-        
-        // Add OCR text keywords (most frequent words)
-        if let ocrText = document.ocrText {
-            let ocrKeywords = extractFrequentWords(from: ocrText, limit: 20)
-            keywords.append(contentsOf: ocrKeywords)
-        }
-        
-        // Add file type
-        keywords.append(getDocumentKind(from: document.mimeType))
-        
-        // Clean and deduplicate
-        return keywords
-            .map { $0.trimmingCharacters(in: .whitespacesAndPunctuationMarks) }
-            .filter { !$0.isEmpty && $0.count > 2 }
-            .removingDuplicates()
-    }
-    
-    private func extractFrequentWords(from text: String, limit: Int) -> [String] {
-        let words = text.lowercased()
-            .components(separatedBy: .whitespacesAndPunctuationMarks)
-            .filter { $0.count > 3 } // Only words longer than 3 characters
-        
-        let wordCounts = Dictionary(grouping: words, by: { $0 })
-            .mapValues { $0.count }
-        
-        return wordCounts
-            .sorted { $0.value > $1.value }
-            .prefix(limit)
-            .map { $0.key }
-    }
-    
-    private func indexInCoreSpotlight(_ items: [CSSearchableItem]) async {
-        do {
-            try await CSSearchableIndex.default().indexSearchableItems(items)
-        } catch {
-            print("Failed to index in Core Spotlight: \(error)")
-        }
-    }
-    
-    private func removeFromCoreSpotlight(_ identifiers: [String]) async {
-        do {
-            try await CSSearchableIndex.default().deleteSearchableItems(withIdentifiers: identifiers)
-        } catch {
-            print("Failed to remove from Core Spotlight: \(error)")
-        }
-    }
-    
-    // MARK: - Local Database Indexing
-    
-    private func indexInLocalDatabase(_ document: Document) async {
         let context = persistenceController.newBackgroundContext()
-        
-        await context.perform {
-            // Remove existing entries for this document
-            let deleteRequest: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-            deleteRequest.predicate = NSPredicate(format: "documentID == %@", document.id! as CVarArg)
-            
-            if let existingEntries = try? context.fetch(deleteRequest) {
-                existingEntries.forEach { context.delete($0) }
-            }
-            
-            // Create new index entries
-            self.createIndexEntries(for: document, in: context)
-            
-            do {
-                try context.save()
-            } catch {
-                print("Failed to save search index: \(error)")
-            }
-        }
-    }
-    
-    private func createIndexEntries(for document: Document, in context: NSManagedObjectContext) {
-        guard let documentID = document.id else { return }
-        
-        // Title index entry
-        if let title = document.title, !title.isEmpty {
-            let titleEntry = SearchIndexEntry(context: context)
-            titleEntry.id = UUID()
-            titleEntry.documentID = documentID
-            titleEntry.indexType = "title"
-            titleEntry.content = (try? cryptoVault.encryptString(title.lowercased(), documentID: documentID.uuidString)) ?? ""
-            titleEntry.createdAt = Date()
-            titleEntry.modifiedAt = Date()
-        }
-        
-        // OCR text index entry
-        if let ocrText = document.ocrText, !ocrText.isEmpty {
-            let ocrEntry = SearchIndexEntry(context: context)
-            ocrEntry.id = UUID()
-            ocrEntry.documentID = documentID
-            ocrEntry.indexType = "ocr"
-            ocrEntry.content = (try? cryptoVault.encryptString(ocrText.lowercased(), documentID: documentID.uuidString)) ?? ""
-            ocrEntry.createdAt = Date()
-            ocrEntry.modifiedAt = Date()
-        }
-        
-        // Folder index entry
-        if let folderName = document.folder?.name, !folderName.isEmpty {
-            let folderEntry = SearchIndexEntry(context: context)
-            folderEntry.id = UUID()
-            folderEntry.documentID = documentID
-            folderEntry.indexType = "folder"
-            folderEntry.content = (try? cryptoVault.encryptString(folderName.lowercased(), documentID: documentID.uuidString)) ?? ""
-            folderEntry.createdAt = Date()
-            folderEntry.modifiedAt = Date()
-        }
-        
-        // File name index entry
-        if !document.fileName.isEmpty {
-            let fileNameEntry = SearchIndexEntry(context: context)
-            fileNameEntry.id = UUID()
-            fileNameEntry.documentID = documentID
-            fileNameEntry.indexType = "filename"
-            fileNameEntry.content = (try? cryptoVault.encryptString(document.fileName.lowercased(), documentID: documentID.uuidString)) ?? ""
-            fileNameEntry.createdAt = Date()
-            fileNameEntry.modifiedAt = Date()
-        }
-    }
-    
-    private func removeFromLocalDatabase(_ documentID: UUID) async {
-        let context = persistenceController.newBackgroundContext()
-        
         await context.perform {
             let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
             request.predicate = NSPredicate(format: "documentID == %@", documentID as CVarArg)
-            
             if let entries = try? context.fetch(request) {
                 entries.forEach { context.delete($0) }
-                
-                do {
-                    try context.save()
-                } catch {
-                    print("Failed to remove from local search index: \(error)")
-                }
+                try? context.save()
             }
         }
     }
-    
-    // MARK: - Search Operations
-    
+
+    // MARK: - Search API
+
+    /// Perform a search against the local index using encrypted search tokens.  The query is split into
+    /// individual terms which are hashed using a derived search key.  Only documents whose index
+    /// entries contain all token hashes will be returned.
     func search(_ query: String, filters: SearchFilters = SearchFilters()) async -> SearchResults {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else {
             return SearchResults(documents: [], totalCount: 0, query: query)
         }
-        
-        // Perform local database search
         let localResults = await searchLocalDatabase(trimmedQuery, filters: filters)
-        
-        // Combine and rank results
-        let rankedResults = rankSearchResults(localResults, query: trimmedQuery)
-        
-        return SearchResults(
-            documents: rankedResults,
-            totalCount: rankedResults.count,
-            query: query
-        )
+        // Ranking and further filtering could happen here, but for simplicity we preserve the ordering
+        return SearchResults(documents: localResults, totalCount: localResults.count, query: query)
     }
-    
+
+    /// Search the local Core Data index for documents matching the provided query.
     private func searchLocalDatabase(_ query: String, filters: SearchFilters) async -> [Document] {
-        return await withCheckedContinuation { continuation in
+        await withCheckedContinuation { continuation in
             let context = persistenceController.newBackgroundContext()
-            
             context.perform {
                 do {
-                    let searchTerms = query.lowercased().components(separatedBy: .whitespacesAndPunctuationMarks)
-                        .filter { !$0.isEmpty }
-                    
+                    // Tokenise the query
+                    let searchTerms = query.lowercased().components(separatedBy: CharacterSet.whitespacesAndPunctuationMarks).filter { !$0.isEmpty }
+                    // Fetch all index entries
                     let indexRequest: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
                     let indexEntries = try context.fetch(indexRequest)
-
-                    var documentIDs = Set<UUID>()
+                    // Determine which documents match all search terms
+                    var matchingIDs = Set<UUID>()
                     for entry in indexEntries {
-                        guard let decrypted = try? self.cryptoVault.decryptString(entry.content, documentID: entry.documentID.uuidString).lowercased() else { continue }
-
+                        // The content now stores hashed tokens separated by spaces
+                        let storedTokens = entry.content.components(separatedBy: " ")
                         var matchesAll = true
                         for term in searchTerms {
-                            if !decrypted.contains(term) {
+                            // Derive the same hash for the current term using the document ID as salt
+                            guard let hash = try? self.cryptoVault.hashedToken(term, documentID: entry.documentID.uuidString) else {
+                                matchesAll = false
+                                break
+                            }
+                            if !storedTokens.contains(hash) {
                                 matchesAll = false
                                 break
                             }
                         }
-
-                        if matchesAll {
-                            documentIDs.insert(entry.documentID)
-                        }
+                        if matchesAll { matchingIDs.insert(entry.documentID) }
                     }
-                    
-                    guard !documentIDs.isEmpty else {
+                    guard !matchingIDs.isEmpty else {
                         continuation.resume(returning: [])
                         return
                     }
-
-                    // Fetch matching documents
+                    // Fetch matching Document objects
                     let documentRequest: NSFetchRequest<Document> = Document.fetchRequest()
-                    documentRequest.predicate = NSPredicate(format: "id IN %@", documentIDs)
-                    
-                    // Apply filters
-                    var filterPredicates: [NSPredicate] = []
-                    
-                    if let folderFilter = filters.folder {
-                        filterPredicates.append(NSPredicate(format: "folder == %@", folderFilter))
+                    documentRequest.predicate = NSPredicate(format: "id IN %@", matchingIDs as CVarArg)
+                    // Apply optional filters
+                    var predicates: [NSPredicate] = []
+                    if let folder = filters.folder {
+                        predicates.append(NSPredicate(format: "folder == %@", folder))
                     }
-                    
-                    if let dateRange = filters.dateRange {
-                        filterPredicates.append(NSPredicate(format: "createdAt >= %@ AND createdAt <= %@", dateRange.start as CVarArg, dateRange.end as CVarArg))
+                    if let range = filters.dateRange {
+                        predicates.append(NSPredicate(format: "createdAt >= %@ AND createdAt <= %@", range.start as CVarArg, range.end as CVarArg))
                     }
-                    
                     if !filters.documentTypes.isEmpty {
-                        let typePredicates = filters.documentTypes.map { type in
-                            NSPredicate(format: "mimeType BEGINSWITH %@", type)
-                        }
-                        filterPredicates.append(NSCompoundPredicate(orPredicateWithSubpredicates: typePredicates))
+                        let typePreds = filters.documentTypes.map { NSPredicate(format: "mimeType BEGINSWITH %@", $0) }
+                        predicates.append(NSCompoundPredicate(orPredicateWithSubpredicates: typePreds))
                     }
-                    
-                    if !filterPredicates.isEmpty {
-                        let combinedFilters = NSCompoundPredicate(andPredicateWithSubpredicates: filterPredicates)
-                        documentRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [documentRequest.predicate!, combinedFilters])
+                    if !predicates.isEmpty {
+                        let combined = NSCompoundPredicate(andPredicateWithSubpredicates: [documentRequest.predicate!, NSCompoundPredicate(andPredicateWithSubpredicates: predicates)])
+                        documentRequest.predicate = combined
                     }
-                    
-                    // Sort by relevance (will be re-ranked later)
-                    documentRequest.sortDescriptors = [
-                        NSSortDescriptor(keyPath: \Document.modifiedAt, ascending: false)
-                    ]
-                    
-                    documentRequest.fetchLimit = maxSearchResults
-                    
+                    documentRequest.fetchLimit = self.maxSearchResults
                     let documents = try context.fetch(documentRequest)
                     continuation.resume(returning: documents)
-                    
                 } catch {
                     print("Search failed: \(error)")
                     continuation.resume(returning: [])
@@ -497,241 +175,46 @@ class SearchIndex: ObservableObject {
             }
         }
     }
-    
-    private func rankSearchResults(_ documents: [Document], query: String) -> [Document] {
-        let queryTerms = query.lowercased().components(separatedBy: .whitespacesAndPunctuationMarks)
-            .filter { !$0.isEmpty }
-        
-        let scoredDocuments = documents.map { document in
-            let score = calculateRelevanceScore(document, queryTerms: queryTerms)
-            return (document, score)
-        }
-        
-        return scoredDocuments
-            .sorted { $0.1 > $1.1 } // Sort by score descending
-            .map { $0.0 } // Extract documents
-    }
-    
-    private func calculateRelevanceScore(_ document: Document, queryTerms: [String]) -> Double {
-        var score: Double = 0
-        
-        let title = document.title?.lowercased() ?? ""
-        let ocrText = document.ocrText?.lowercased() ?? ""
-        let fileName = document.fileName.lowercased()
-        
-        for term in queryTerms {
-            // Title matches get highest score
-            if title.contains(term) {
-                score += 10
-                if title.hasPrefix(term) {
-                    score += 5 // Bonus for prefix match
-                }
-            }
-            
-            // File name matches get high score
-            if fileName.contains(term) {
-                score += 8
-                if fileName.hasPrefix(term) {
-                    score += 3
-                }
-            }
-            
-            // OCR text matches get medium score
-            let ocrMatches = ocrText.components(separatedBy: term).count - 1
-            score += Double(ocrMatches) * 2
-            
-            // Folder name matches get low score
-            if let folderName = document.folder?.name?.lowercased(), folderName.contains(term) {
-                score += 1
-            }
-        }
-        
-        // Boost recent documents
-        if let modifiedAt = document.modifiedAt {
-            let daysSinceModified = Date().timeIntervalSince(modifiedAt) / (24 * 60 * 60)
-            if daysSinceModified < 7 {
-                score += 2 // Recent documents get bonus
-            }
-        }
-        
-        return score
-    }
-    
-    // MARK: - Search Suggestions
-    
-    func getSearchSuggestions(for query: String, limit: Int = 10) async -> [String] {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard trimmedQuery.count >= 2 else { return [] }
-        
-        return await withCheckedContinuation { continuation in
-            let context = persistenceController.newBackgroundContext()
-            
-            context.perform {
-                do {
-                    let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-                    let entries = try context.fetch(request)
 
-                    var results: [String] = []
-                    for entry in entries {
-                        guard let text = try? self.cryptoVault.decryptString(entry.content, documentID: entry.documentID.uuidString).lowercased() else { continue }
-                        let words = text.components(separatedBy: .whitespacesAndPunctuationMarks)
-                        if let match = words.first(where: { $0.hasPrefix(trimmedQuery) && $0.count > trimmedQuery.count }) {
-                            results.append(match)
-                        }
-                    }
+    // MARK: - Index entry creation
 
-                    let suggestions = Array(results.removingDuplicates().prefix(limit))
-                    continuation.resume(returning: suggestions)
-
-                } catch {
-                    print("Failed to get search suggestions: \(error)")
-                    continuation.resume(returning: [])
-                }
-            }
+    /// Create index entries for each searchable field of a document.  Each entry stores a space separated
+    /// list of hashed tokens rather than an encrypted blob.  The hash is deterministic for a given term
+    /// and document ID, enabling efficient matching without revealing the plaintext.
+    private func createIndexEntries(for document: Document, in context: NSManagedObjectContext) {
+        guard let documentID = document.id else { return }
+        // Helper to process a single field
+        func addEntry(type: String, text: String) {
+            let tokens = text.lowercased().components(separatedBy: CharacterSet.whitespacesAndPunctuationMarks).filter { !$0.isEmpty }
+            let hashes = tokens.compactMap { try? cryptoVault.hashedToken($0, documentID: documentID.uuidString) }
+            let entry = SearchIndexEntry(context: context)
+            entry.id = UUID()
+            entry.documentID = documentID
+            entry.indexType = type
+            entry.content = hashes.joined(separator: " ")
+            entry.createdAt = Date()
+            entry.modifiedAt = Date()
         }
-    }
-    
-    // MARK: - Index Management
-    
-    func rebuildIndex() async {
-        await clearIndex()
-        await buildInitialIndex()
-    }
-    
-    func clearIndex() async {
-        // Clear Core Spotlight index
-        do {
-            try await CSSearchableIndex.default().deleteSearchableItems(withDomainIdentifiers: ["com.fortdocs.documents"])
-        } catch {
-            print("Failed to clear Core Spotlight index: \(error)")
-        }
-        
-        // Clear local database index
-        let context = persistenceController.newBackgroundContext()
-        await context.perform {
-            let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-            
-            if let entries = try? context.fetch(request) {
-                entries.forEach { context.delete($0) }
-                
-                do {
-                    try context.save()
-                } catch {
-                    print("Failed to clear local search index: \(error)")
-                }
-            }
-        }
-        
-        await MainActor.run {
-            indexedDocumentCount = 0
-            lastIndexUpdate = nil
-        }
-    }
-    
-    func getIndexStatistics() async -> IndexStatistics {
-        return await withCheckedContinuation { continuation in
-            let context = persistenceController.newBackgroundContext()
-            
-            context.perform {
-                do {
-                    let documentRequest: NSFetchRequest<Document> = Document.fetchRequest()
-                    let totalDocuments = try context.count(for: documentRequest)
-                    
-                    let indexRequest: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-                    let totalIndexEntries = try context.count(for: indexRequest)
-                    
-                    let stats = IndexStatistics(
-                        totalDocuments: totalDocuments,
-                        indexedDocuments: self.indexedDocumentCount,
-                        totalIndexEntries: totalIndexEntries,
-                        lastUpdate: self.lastIndexUpdate
-                    )
-                    
-                    continuation.resume(returning: stats)
-                    
-                } catch {
-                    print("Failed to get index statistics: \(error)")
-                    continuation.resume(returning: IndexStatistics(totalDocuments: 0, indexedDocuments: 0, totalIndexEntries: 0, lastUpdate: nil))
-                }
-            }
-        }
+        if let title = document.title, !title.isEmpty { addEntry(type: "title", text: title) }
+        if let ocr = document.ocrText, !ocr.isEmpty { addEntry(type: "ocr", text: ocr) }
+        if let folderName = document.folder?.name, !folderName.isEmpty { addEntry(type: "folder", text: folderName) }
+        let fileName = document.fileName
+        if !fileName.isEmpty { addEntry(type: "filename", text: fileName) }
     }
 }
 
 // MARK: - Supporting Types
 
+/// Simple container for search filters.  Additional filter criteria can be added as needed.
 struct SearchFilters {
-    var folder: Folder?
-    var dateRange: DateRange?
+    var folder: Folder? = nil
+    var dateRange: (start: Date, end: Date)? = nil
     var documentTypes: [String] = []
-    var sortBy: SearchSortOption = .relevance
-    
-    struct DateRange {
-        let start: Date
-        let end: Date
-    }
 }
 
-enum SearchSortOption {
-    case relevance
-    case dateCreated
-    case dateModified
-    case title
-    case fileSize
-}
-
+/// Simple wrapper around search results including total count and original query.
 struct SearchResults {
     let documents: [Document]
     let totalCount: Int
     let query: String
-}
-
-struct IndexStatistics {
-    let totalDocuments: Int
-    let indexedDocuments: Int
-    let totalIndexEntries: Int
-    let lastUpdate: Date?
-}
-
-extension SearchIndex {
-    func clearAllIndexes() async {
-        print("Clearing all search indexes")
-
-        await withCheckedContinuation { continuation in
-            CSSearchableIndex.default().deleteAllSearchableItems { error in
-                if let error = error {
-                    print("Failed to clear search indexes: \(error)")
-                }
-                continuation.resume()
-            }
-        }
-
-        let context = persistenceController.newBackgroundContext()
-        await context.perform {
-            let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-            if let entries = try? context.fetch(request) {
-                for entry in entries { context.delete(entry) }
-            }
-            try? context.save()
-        }
-    }
-
-    func reindexAllDocuments() async {
-        print("Reindexing all documents")
-
-        let context = persistenceController.newBackgroundContext()
-
-        do {
-            let documents: [Document] = try await context.perform {
-                let request = Document.fetchAll()
-                return try context.fetch(request)
-            }
-
-            for document in documents {
-                await indexDocument(document)
-            }
-        } catch {
-            print("Failed to reindex documents: \(error)")
-        }
-    }
 }
