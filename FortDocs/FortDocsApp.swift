@@ -25,8 +25,7 @@ struct FortDocsApp: App {
         // Initialize default folders if needed
         folderStore.initializeDefaultFolders()
         
-        // Setup search indexing
-        searchIndex.setupCoreSpotlight()
+        // Search index is configured automatically on initialization
         
         // Configure app security settings
         configureAppSecurity()
@@ -48,44 +47,6 @@ struct FortDocsApp: App {
         // Enable jailbreak detection in release builds
         SecurityUtils.enableJailbreakDetection()
         #endif
-    }
-}
-
-// MARK: - Core Data Stack
-class PersistenceController {
-    static let shared = PersistenceController()
-    
-    lazy var container: NSPersistentCloudKitContainer = {
-        let container = NSPersistentCloudKitContainer(name: "FortDocs")
-        
-        // Configure for CloudKit
-        let storeDescription = container.persistentStoreDescriptions.first!
-        storeDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-        storeDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        
-        container.loadPersistentStores { _, error in
-            if let error = error as NSError? {
-                fatalError("Core Data error: \(error), \(error.userInfo)")
-            }
-        }
-        
-        container.viewContext.automaticallyMergesChangesFromParent = true
-        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
-        
-        return container
-    }()
-    
-    func save() {
-        let context = container.viewContext
-        
-        if context.hasChanges {
-            do {
-                try context.save()
-            } catch {
-                let nsError = error as NSError
-                fatalError("Core Data save error: \(nsError), \(nsError.userInfo)")
-            }
-        }
     }
 }
 
