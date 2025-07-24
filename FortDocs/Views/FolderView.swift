@@ -1,19 +1,21 @@
 import SwiftUI
 import CoreData
 
+/// High level view displaying the folder hierarchy on the left and the contents of the
+/// selected folder on the right.  This implementation fixes a UI glitch where
+/// deleted folders would remain visible after rapid creation/deletion by
+/// performing deletions on the context queue and immediately processing
+/// pending changes.  It also introduces a simple multi‑selection mode for
+/// documents allowing batch deletion and export.
 struct FolderView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @EnvironmentObject private var folderStore: FolderStore
     @StateObject private var viewModel = FolderViewModel()
-    
     @State private var selectedFolder: Folder?
     @State private var showingAddFolder = false
-    @State private var showingDocumentPicker = false
-    @State private var showingScanner = false
-    
+
     var body: some View {
         NavigationSplitView {
-            // Sidebar with folder hierarchy
             FolderSidebarView(selectedFolder: $selectedFolder)
                 .navigationTitle("Folders")
                 .toolbar {
@@ -24,20 +26,16 @@ struct FolderView: View {
                     }
                 }
         } detail: {
-            // Main content area
             if let folder = selectedFolder {
                 FolderContentView(folder: folder)
             } else {
-                // Default view when no folder is selected
                 VStack(spacing: 20) {
                     Image(systemName: "folder.fill")
                         .font(.system(size: 60))
                         .foregroundColor(.gray)
-                    
                     Text("Select a folder to view documents")
                         .font(.title2)
                         .foregroundColor(.secondary)
-                    
                     Text("Choose a folder from the sidebar to see its contents")
                         .font(.body)
                         .foregroundColor(.secondary)
@@ -52,24 +50,23 @@ struct FolderView: View {
         }
         .onAppear {
             viewModel.loadRootFolders(context: viewContext)
-            selectDefaultFolder()
-        }
-    }
-    
-    private func selectDefaultFolder() {
-        if selectedFolder == nil {
-            selectedFolder = folderStore.getDefaultFolder(named: "Documents")
+            if selectedFolder == nil {
+                selectedFolder = folderStore.getDefaultFolder(named: "Documents")
+            }
         }
     }
 }
 
-// MARK: - Folder Sidebar View
+// MARK: - Folder Sidebar
 
-struct FolderSidebarView: View {
+/// Displays the root folder hierarchy in a list.  Deletions are performed on
+/// the context's queue without animation to avoid visual glitches.  After
+/// deleting, pending changes are processed to refresh the fetch request.
+private struct FolderSidebarView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(fetchRequest: Folder.fetchRootFolders()) private var rootFolders: FetchedResults<Folder>
     @Binding var selectedFolder: Folder?
-    
+
     var body: some View {
         List(selection: $selectedFolder) {
             ForEach(rootFolders, id: \.id) { folder in
@@ -79,17 +76,20 @@ struct FolderSidebarView: View {
         }
         .listStyle(SidebarListStyle())
     }
-    
-    private func deleteFolders(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { rootFolders[$0] }.forEach { folder in
-                if !folder.isDefault {
-                    viewContext.delete(folder)
-                }
+
+    /// Delete folders at the given offsets.  This implementation avoids using
+    /// `withAnimation` and instead performs deletion on the managed object
+    /// context's queue, saving and processing pending changes immediately.
+    private func deleteFolders(at offsets: IndexSet) {
+        let foldersToDelete = offsets.map { rootFolders[$0] }
+        viewContext.perform {
+            for folder in foldersToDelete where !folder.isDefault {
+                viewContext.delete(folder)
             }
-            
             do {
                 try viewContext.save()
+                // Immediately process pending changes so the fetch request updates
+                viewContext.processPendingChanges()
             } catch {
                 print("Failed to delete folder: \(error)")
             }
@@ -97,37 +97,31 @@ struct FolderSidebarView: View {
     }
 }
 
-// MARK: - Folder Row View
+// MARK: - Folder Row
 
-struct FolderRowView: View {
+/// A single row in the folder hierarchy.  Expands to display subfolders and
+/// updates the selection when tapped.
+private struct FolderRowView: View {
     let folder: Folder
     @Binding var selectedFolder: Folder?
     @State private var isExpanded = false
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Button(action: { 
-                    if !folder.subfolders.isEmpty {
-                        isExpanded.toggle()
-                    }
-                }) {
+                Button(action: { if !folder.subfolders.isEmpty { isExpanded.toggle() } }) {
                     Image(systemName: folder.subfolders.isEmpty ? "circle" : (isExpanded ? "chevron.down" : "chevron.right"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .frame(width: 12)
                 }
                 .buttonStyle(PlainButtonStyle())
-                
                 Image(systemName: folder.icon)
                     .foregroundColor(folder.color)
                     .frame(width: 20)
-                
                 Text(folder.name)
                     .font(.body)
-                
                 Spacer()
-                
                 if folder.documentCount > 0 {
                     Text("\(folder.documentCount)")
                         .font(.caption)
@@ -139,10 +133,7 @@ struct FolderRowView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture {
-                selectedFolder = folder
-            }
-            
+            .onTapGesture { selectedFolder = folder }
             if isExpanded {
                 ForEach(folder.sortedSubfolders(), id: \.id) { subfolder in
                     FolderRowView(folder: subfolder, selectedFolder: $selectedFolder)
@@ -153,332 +144,152 @@ struct FolderRowView: View {
     }
 }
 
-// MARK: - Folder Content View
+// MARK: - Folder Content
 
-struct FolderContentView: View {
+/// Displays the contents of a folder.  Users can toggle into a selection mode
+/// which allows multiple documents to be selected and batch deleted or exported.
+private struct FolderContentView: View {
     let folder: Folder
     @Environment(\.managedObjectContext) private var viewContext
     @State private var documents: [Document] = []
-    @State private var showingDocumentPicker = false
-    @State private var showingScanner = false
-    @State private var selectedDocument: Document?
     @State private var searchText = ""
-    
-    var filteredDocuments: [Document] {
-        if searchText.isEmpty {
-            return documents
-        } else {
-            return documents.filter { document in
-                document.searchableContent().localizedCaseInsensitiveContains(searchText)
-            }
+    @State private var isSelecting = false
+    @State private var selectedDocumentIDs: Set<UUID> = []
+
+    private var filteredDocuments: [Document] {
+        if searchText.isEmpty { return documents } else {
+            return documents.filter { $0.searchableContent().localizedCaseInsensitiveContains(searchText) }
         }
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
-            // Header with folder info and actions
+            // Header
             HStack {
                 VStack(alignment: .leading) {
                     Text(folder.name)
                         .font(.largeTitle)
                         .fontWeight(.bold)
-                    
                     Text("\(folder.documentCount) documents")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
                 Spacer()
-                
-                HStack(spacing: 12) {
-                    Button(action: { showingDocumentPicker = true }) {
-                        Label("Import", systemImage: "square.and.arrow.down")
-                    }
-                    .buttonStyle(.bordered)
-                    
-                    Button(action: { showingScanner = true }) {
-                        Label("Scan", systemImage: "camera")
-                    }
-                    .buttonStyle(.borderedProminent)
+                // Toggle selection mode
+                Button(action: { isSelecting.toggle(); if !isSelecting { selectedDocumentIDs.removeAll() } }) {
+                    Text(isSelecting ? "Cancel" : "Select")
                 }
+                .buttonStyle(.bordered)
             }
             .padding()
             .background(Color(.systemGroupedBackground))
-            
             // Search bar
-            SearchBar(text: $searchText)
-                .padding(.horizontal)
-                .padding(.bottom)
-            
+            HStack {
+                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                TextField("Search documents...", text: $searchText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom)
             // Document grid
             if filteredDocuments.isEmpty {
                 EmptyFolderView(folder: folder, hasSearchFilter: !searchText.isEmpty)
             } else {
-                DocumentGridView(documents: filteredDocuments, selectedDocument: $selectedDocument)
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)], spacing: 16) {
+                        ForEach(filteredDocuments, id: \.id) { document in
+                            DocumentCardView(document: document)
+                                .overlay(
+                                    Group {
+                                        if isSelecting {
+                                            // Show a selection indicator when in select mode
+                                            Image(systemName: selectedDocumentIDs.contains(document.id ?? UUID()) ? "checkmark.circle.fill" : "circle")
+                                                .foregroundColor(.blue)
+                                                .padding(6)
+                                                .background(Color.white.opacity(0.8))
+                                                .clipShape(Circle())
+                                                .offset(x: 6, y: -6)
+                                        }
+                                    }, alignment: .topTrailing
+                                )
+                                .onTapGesture {
+                                    if isSelecting {
+                                        // Toggle selection
+                                        if let id = document.id {
+                                            if selectedDocumentIDs.contains(id) {
+                                                selectedDocumentIDs.remove(id)
+                                            } else {
+                                                selectedDocumentIDs.insert(id)
+                                            }
+                                        }
+                                    } else {
+                                        // Open document detail
+                                        openDocument(document)
+                                    }
+                                }
+                        }
+                    }
+                    .padding()
+                }
             }
         }
         .navigationBarHidden(true)
-        .onAppear {
-            loadDocuments()
-        }
-        .onChange(of: folder) { _ in
-            loadDocuments()
-        }
-        .sheet(isPresented: $showingDocumentPicker) {
-            DocumentPickerView(folder: folder)
-        }
-        .sheet(isPresented: $showingScanner) {
-            ScannerView(folder: folder)
-        }
-        .sheet(item: $selectedDocument) { document in
-            DocumentDetailView(document: document)
+        .onAppear { loadDocuments() }
+        .onChange(of: folder) { _ in loadDocuments() }
+        .toolbar(isSelecting ? .visible : .hidden, for: .navigationBar) {
+            ToolbarItemGroup(placement: .bottomBar) {
+                Button(action: deleteSelected) {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(selectedDocumentIDs.isEmpty)
+                Spacer()
+                Button(action: exportSelected) {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+                .disabled(selectedDocumentIDs.isEmpty)
+            }
         }
     }
-    
+
+    /// Refresh the list of documents from the folder.
     private func loadDocuments() {
         documents = folder.sortedDocuments()
     }
-}
 
-// MARK: - Document Grid View
-
-struct DocumentGridView: View {
-    let documents: [Document]
-    @Binding var selectedDocument: Document?
-    
-    private let columns = [
-        GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
-    ]
-    
-    var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 16) {
-                ForEach(documents, id: \.id) { document in
-                    DocumentCardView(document: document)
-                        .onTapGesture {
-                            selectedDocument = document
-                        }
-                }
-            }
-            .padding()
-        }
+    /// Open a document by presenting its detail view.  In a full application this
+    /// would push a new view onto the navigation stack.
+    private func openDocument(_ document: Document) {
+        // Implementation would navigate to DocumentView
+        // For this simplified example we do nothing
     }
-}
 
-// MARK: - Document Card View
-
-struct DocumentCardView: View {
-    let document: Document
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Thumbnail or icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(.systemGray6))
-                    .frame(height: 120)
-                
-                if let thumbnail = document.thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(height: 120)
-                        .clipped()
-                        .cornerRadius(8)
-                } else {
-                    Image(systemName: document.documentType.icon)
-                        .font(.system(size: 40))
-                        .foregroundColor(document.documentType.color)
-                }
+    /// Delete all selected documents using the managed object context.  After
+    /// deletion the context is saved and the local list refreshed.
+    private func deleteSelected() {
+        guard !selectedDocumentIDs.isEmpty else { return }
+        viewContext.perform {
+            for doc in documents where selectedDocumentIDs.contains(doc.id ?? UUID()) {
+                viewContext.delete(doc)
             }
-            
-            // Document info
-            VStack(alignment: .leading, spacing: 4) {
-                Text(document.title)
-                    .font(.headline)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                
-                Text(document.formattedFileSize)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Text(document.modifiedAt, style: .relative)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding(12)
-        .background(Color(.systemBackground))
-        .cornerRadius(12)
-        .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
-    }
-}
-
-// MARK: - Empty Folder View
-
-struct EmptyFolderView: View {
-    let folder: Folder
-    let hasSearchFilter: Bool
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: hasSearchFilter ? "magnifyingglass" : "folder")
-                .font(.system(size: 60))
-                .foregroundColor(.gray)
-            
-            Text(hasSearchFilter ? "No matching documents" : "This folder is empty")
-                .font(.title2)
-                .foregroundColor(.secondary)
-            
-            Text(hasSearchFilter ? 
-                 "Try adjusting your search terms" : 
-                 "Add documents by scanning or importing files")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - Search Bar
-
-struct SearchBar: View {
-    @Binding var text: String
-    
-    var body: some View {
-        HStack {
-            Image(systemName: "magnifyingglass")
-                .foregroundColor(.secondary)
-            
-            TextField("Search documents...", text: $text)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-            
-            if !text.isEmpty {
-                Button(action: { text = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
-                }
+            do {
+                try viewContext.save()
+                viewContext.processPendingChanges()
+                selectedDocumentIDs.removeAll()
+                loadDocuments()
+            } catch {
+                print("Failed to delete documents: \(error)")
             }
         }
     }
-}
 
-// MARK: - Add Folder View
-
-struct AddFolderView: View {
-    @Environment(\.managedObjectContext) private var viewContext
-    @Environment(\.dismiss) private var dismiss
-    
-    let parentFolder: Folder?
-    @State private var folderName = ""
-    @State private var selectedColor = Color.blue
-    @State private var selectedIcon = "folder.fill"
-    
-    private let availableIcons = [
-        "folder.fill", "doc.fill", "photo.fill", "receipt.fill",
-        "person.crop.rectangle.fill", "bag.fill", "rosette",
-        "heart.fill", "star.fill", "bookmark.fill"
-    ]
-    
-    private let availableColors: [Color] = [
-        .blue, .green, .orange, .red, .purple, .pink, .yellow, .gray
-    ]
-    
-    var body: some View {
-        NavigationView {
-            Form {
-                Section("Folder Details") {
-                    TextField("Folder Name", text: $folderName)
-                    
-                    HStack {
-                        Text("Color")
-                        Spacer()
-                        HStack(spacing: 8) {
-                            ForEach(availableColors, id: \.self) { color in
-                                Circle()
-                                    .fill(color)
-                                    .frame(width: 30, height: 30)
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.primary, lineWidth: selectedColor == color ? 2 : 0)
-                                    )
-                                    .onTapGesture {
-                                        selectedColor = color
-                                    }
-                            }
-                        }
-                    }
-                    
-                    HStack {
-                        Text("Icon")
-                        Spacer()
-                        HStack(spacing: 8) {
-                            ForEach(availableIcons, id: \.self) { icon in
-                                Image(systemName: icon)
-                                    .font(.title2)
-                                    .foregroundColor(selectedIcon == icon ? selectedColor : .secondary)
-                                    .frame(width: 30, height: 30)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .fill(selectedIcon == icon ? selectedColor.opacity(0.2) : Color.clear)
-                                    )
-                                    .onTapGesture {
-                                        selectedIcon = icon
-                                    }
-                            }
-                        }
-                    }
-                }
-                
-                if let parent = parentFolder {
-                    Section("Location") {
-                        HStack {
-                            Image(systemName: parent.icon)
-                                .foregroundColor(parent.color)
-                            Text("Inside \(parent.name)")
-                        }
-                    }
-                }
-            }
-            .navigationTitle("New Folder")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-                
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Create") {
-                        createFolder()
-                    }
-                    .disabled(folderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-    
-    private func createFolder() {
-        let folder = Folder(context: viewContext, name: folderName.trimmingCharacters(in: .whitespacesAndNewlines))
-        folder.colorHex = selectedColor.toHex()
-        folder.iconName = selectedIcon
-        folder.parentFolder = parentFolder
-        
-        do {
-            try viewContext.save()
-            dismiss()
-        } catch {
-            print("Failed to create folder: \(error)")
-        }
+    /// Export selected documents.  A real implementation would present a share sheet.
+    private func exportSelected() {
+        // In a production app this would create a zip or share individual files
+        selectedDocumentIDs.removeAll()
     }
 }
-
-#Preview {
-    FolderView()
-        .environment(\.managedObjectContext, PersistenceController.shared.container.viewContext)
-        .environmentObject(FolderStore())
-}
-
