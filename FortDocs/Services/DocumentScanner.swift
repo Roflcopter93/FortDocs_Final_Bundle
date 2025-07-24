@@ -494,7 +494,7 @@ private class DocumentClassifier {
         let lowercasedText = text.lowercased()
         
         // Define classification rules
-        let classifications: [(DocumentType, [String], Double)] = [
+        let classifications: [(DocumentCategory, [String], Double)] = [
             (.invoice, ["invoice", "bill", "billing", "payment due", "amount due", "inv#"], 0.8),
             (.receipt, ["receipt", "thank you", "total", "subtotal", "tax", "change"], 0.7),
             (.identity, ["driver license", "passport", "id card", "identification", "date of birth"], 0.9),
@@ -536,7 +536,7 @@ private class DocumentClassifier {
         )
     }
     
-    private func generateTitle(for type: DocumentType, from text: String) -> String {
+    private func generateTitle(for type: DocumentCategory, from text: String) -> String {
         let lines = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndPunctuationMarks) }
             .filter { !$0.isEmpty }
@@ -615,14 +615,14 @@ struct TextBlock {
 }
 
 struct DocumentClassification {
-    let type: DocumentType
+    let type: DocumentCategory
     let confidence: Double
     let suggestedTitle: String
     let suggestedFolder: String
     let extractedKeywords: [String]
 }
 
-enum DocumentType {
+enum DocumentCategory {
     case invoice
     case receipt
     case identity

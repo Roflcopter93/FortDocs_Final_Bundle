@@ -67,54 +67,6 @@ extension Document {
     }
 }
 
-// MARK: - Document Type Enumeration
-
-enum DocumentType: String, CaseIterable {
-    case pdf = "PDF"
-    case image = "Image"
-    case text = "Text"
-    case unknown = "Unknown"
-    
-    static func from(mimeType: String) -> DocumentType {
-        switch mimeType.lowercased() {
-        case "application/pdf":
-            return .pdf
-        case let type where type.hasPrefix("image/"):
-            return .image
-        case let type where type.hasPrefix("text/"):
-            return .text
-        default:
-            return .unknown
-        }
-    }
-    
-    var icon: String {
-        switch self {
-        case .pdf:
-            return "doc.fill"
-        case .image:
-            return "photo.fill"
-        case .text:
-            return "doc.text.fill"
-        case .unknown:
-            return "doc.fill"
-        }
-    }
-    
-    var color: Color {
-        switch self {
-        case .pdf:
-            return .red
-        case .image:
-            return .green
-        case .text:
-            return .blue
-        case .unknown:
-            return .gray
-        }
-    }
-}
-
 // MARK: - Document Extensions
 
 extension Document {
