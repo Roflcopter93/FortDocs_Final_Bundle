@@ -182,6 +182,20 @@ final class SearchIndexTests: XCTestCase {
         XCTAssertGreaterThan(results.documents.count, 0)
         XCTAssertTrue(results.documents.contains { $0.title?.lowercased().contains("meeting") == true })
     }
+
+    func testIndexedContentEncrypted() async throws {
+        let document = testDocuments.first!
+        await searchIndex.indexDocument(document)
+
+        let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "documentID == %@", document.id! as CVarArg)
+
+        let entries = try context.fetch(request)
+        XCTAssertFalse(entries.isEmpty)
+        for entry in entries {
+            XCTAssertFalse(entry.content.contains(document.title!.lowercased()))
+        }
+    }
     
     func testSearchInTitle() async throws {
         for document in testDocuments {

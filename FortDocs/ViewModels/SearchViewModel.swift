@@ -198,7 +198,7 @@ class SearchViewModel: ObservableObject {
         }
     }
     
-    private func buildTextSearchPredicate(query: String) -> NSPredicate {
+    fileprivate func buildTextSearchPredicate(query: String) -> NSPredicate {
         let searchTerms = query.components(separatedBy: .whitespacesAndPunctuationMarks)
             .filter { !$0.isEmpty }
         
@@ -208,8 +208,9 @@ class SearchViewModel: ObservableObject {
             var termPredicates: [NSPredicate] = []
             
             let options: NSComparisonPredicate.Options = caseSensitive ? [] : [.caseInsensitive]
+            let escaped = NSRegularExpression.escapedPattern(for: term)
             let format = wholeWordsOnly ? "MATCHES" : "CONTAINS"
-            let pattern = wholeWordsOnly ? ".*\\b\(term)\\b.*" : term
+            let pattern = wholeWordsOnly ? ".*\\b\(escaped)\\b.*" : escaped
             
             // Search in title
             termPredicates.append(NSPredicate(format: "title \(format)[\(options.rawValue)] %@", pattern))

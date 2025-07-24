@@ -411,8 +411,12 @@ class CloudKitService: ObservableObject {
     
     private func setupSubscriptions() {
         Task {
-            try await createDocumentSubscription()
-            try await createFolderSubscription()
+            do {
+                try await createDocumentSubscription()
+                try await createFolderSubscription()
+            } catch {
+                print("Failed to set up subscriptions: \(error)")
+            }
         }
     }
     
