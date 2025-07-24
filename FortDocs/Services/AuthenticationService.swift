@@ -1,11 +1,13 @@
 import Foundation
 import LocalAuthentication
 import SwiftUI
+import UIKit
 import CryptoKit
 import Security
 
 @MainActor
 class AuthenticationService: ObservableObject {
+    static let shared = AuthenticationService()
     @Published var isAuthenticated = false
     @Published var biometricType: LABiometryType = .none
     @Published var authenticationError: String?
@@ -16,12 +18,27 @@ class AuthenticationService: ObservableObject {
     private let keychain = KeychainService()
     private let maxFailedAttempts = 5
     private let lockoutDurations: [TimeInterval] = [30, 300, 1800, 3600, 86400] // 30s, 5m, 30m, 1h, 24h
+    private let autoLockKey = "AutoLockTimeout"
+
+    @Published var autoLockTimeout: TimeInterval = 0
+    private var lastInactiveDate: Date?
     
     // MARK: - Initialization
     
     init() {
         checkBiometricAvailability()
         checkLockoutStatus()
+        autoLockTimeout = UserDefaults.standard.double(forKey: autoLockKey)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appWillResignActive),
+            name: UIApplication.willResignActiveNotification,
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil)
     }
     
     // MARK: - Public Properties
@@ -147,6 +164,11 @@ class AuthenticationService: ObservableObject {
         isAuthenticated = false
         authenticationError = nil
     }
+
+    func updateAutoLockTimeout(_ timeout: TimeInterval) {
+        autoLockTimeout = timeout
+        UserDefaults.standard.set(timeout, forKey: autoLockKey)
+    }
     
     // MARK: - Private Methods
     
@@ -225,6 +247,19 @@ class AuthenticationService: ObservableObject {
         keychain.setLockoutEndTime(lockoutEndTime!.timeIntervalSince1970)
         
         setupUnlockTimer()
+    }
+
+    @objc private func appWillResignActive() {
+        lastInactiveDate = Date()
+    }
+
+    @objc private func appDidBecomeActive() {
+        guard let lastInactiveDate else { return }
+        let elapsed = Date().timeIntervalSince(lastInactiveDate)
+        if elapsed >= autoLockTimeout {
+            logout()
+        }
+        self.lastInactiveDate = nil
     }
     
     private func setupUnlockTimer() {

@@ -342,7 +342,7 @@ class SearchIndex: ObservableObject {
             titleEntry.id = UUID()
             titleEntry.documentID = documentID
             titleEntry.indexType = "title"
-            titleEntry.content = title.lowercased()
+            titleEntry.content = (try? cryptoVault.encryptString(title.lowercased(), documentID: documentID.uuidString)) ?? ""
             titleEntry.createdAt = Date()
             titleEntry.modifiedAt = Date()
         }
@@ -353,7 +353,7 @@ class SearchIndex: ObservableObject {
             ocrEntry.id = UUID()
             ocrEntry.documentID = documentID
             ocrEntry.indexType = "ocr"
-            ocrEntry.content = ocrText.lowercased()
+            ocrEntry.content = (try? cryptoVault.encryptString(ocrText.lowercased(), documentID: documentID.uuidString)) ?? ""
             ocrEntry.createdAt = Date()
             ocrEntry.modifiedAt = Date()
         }
@@ -364,7 +364,7 @@ class SearchIndex: ObservableObject {
             folderEntry.id = UUID()
             folderEntry.documentID = documentID
             folderEntry.indexType = "folder"
-            folderEntry.content = folderName.lowercased()
+            folderEntry.content = (try? cryptoVault.encryptString(folderName.lowercased(), documentID: documentID.uuidString)) ?? ""
             folderEntry.createdAt = Date()
             folderEntry.modifiedAt = Date()
         }
@@ -375,7 +375,7 @@ class SearchIndex: ObservableObject {
             fileNameEntry.id = UUID()
             fileNameEntry.documentID = documentID
             fileNameEntry.indexType = "filename"
-            fileNameEntry.content = document.fileName.lowercased()
+            fileNameEntry.content = (try? cryptoVault.encryptString(document.fileName.lowercased(), documentID: documentID.uuidString)) ?? ""
             fileNameEntry.createdAt = Date()
             fileNameEntry.modifiedAt = Date()
         }
@@ -430,27 +430,31 @@ class SearchIndex: ObservableObject {
                     let searchTerms = query.lowercased().components(separatedBy: .whitespacesAndPunctuationMarks)
                         .filter { !$0.isEmpty }
                     
-                    var predicates: [NSPredicate] = []
-                    
-                    // Build search predicates for each term
-                    for term in searchTerms {
-                        let termPredicates = [
-                            NSPredicate(format: "content CONTAINS[cd] %@", term)
-                        ]
-                        
-                        let termPredicate = NSCompoundPredicate(orPredicateWithSubpredicates: termPredicates)
-                        predicates.append(termPredicate)
+                    let indexRequest: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
+                    let indexEntries = try context.fetch(indexRequest)
+
+                    var documentIDs = Set<UUID>()
+                    for entry in indexEntries {
+                        guard let decrypted = try? self.cryptoVault.decryptString(entry.content, documentID: entry.documentID.uuidString).lowercased() else { continue }
+
+                        var matchesAll = true
+                        for term in searchTerms {
+                            if !decrypted.contains(term) {
+                                matchesAll = false
+                                break
+                            }
+                        }
+
+                        if matchesAll {
+                            documentIDs.insert(entry.documentID)
+                        }
                     }
                     
-                    let searchPredicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
-                    
-                    // Search index entries
-                    let indexRequest: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-                    indexRequest.predicate = searchPredicate
-                    
-                    let indexEntries = try context.fetch(indexRequest)
-                    let documentIDs = Set(indexEntries.map { $0.documentID })
-                    
+                    guard !documentIDs.isEmpty else {
+                        continuation.resume(returning: [])
+                        return
+                    }
+
                     // Fetch matching documents
                     let documentRequest: NSFetchRequest<Document> = Document.fetchRequest()
                     documentRequest.predicate = NSPredicate(format: "id IN %@", documentIDs)
@@ -567,23 +571,20 @@ class SearchIndex: ObservableObject {
             context.perform {
                 do {
                     let request: NSFetchRequest<SearchIndexEntry> = SearchIndexEntry.fetchRequest()
-                    request.predicate = NSPredicate(format: "content BEGINSWITH %@", trimmedQuery)
-                    request.fetchLimit = limit * 2 // Fetch more to account for duplicates
-                    
                     let entries = try context.fetch(request)
-                    
-                    let suggestions = entries
-                        .compactMap { entry in
-                            // Extract the word that starts with the query
-                            let words = entry.content.components(separatedBy: .whitespacesAndPunctuationMarks)
-                            return words.first { $0.hasPrefix(trimmedQuery) && $0.count > trimmedQuery.count }
+
+                    var results: [String] = []
+                    for entry in entries {
+                        guard let text = try? self.cryptoVault.decryptString(entry.content, documentID: entry.documentID.uuidString).lowercased() else { continue }
+                        let words = text.components(separatedBy: .whitespacesAndPunctuationMarks)
+                        if let match = words.first(where: { $0.hasPrefix(trimmedQuery) && $0.count > trimmedQuery.count }) {
+                            results.append(match)
                         }
-                        .removingDuplicates()
-                        .prefix(limit)
-                        .map { String($0) }
-                    
-                    continuation.resume(returning: Array(suggestions))
-                    
+                    }
+
+                    let suggestions = Array(results.removingDuplicates().prefix(limit))
+                    continuation.resume(returning: suggestions)
+
                 } catch {
                     print("Failed to get search suggestions: \(error)")
                     continuation.resume(returning: [])

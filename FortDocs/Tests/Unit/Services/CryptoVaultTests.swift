@@ -124,6 +124,24 @@ final class CryptoVaultTests: XCTestCase {
         try? FileManager.default.removeItem(at: encryptedURL)
         try? FileManager.default.removeItem(at: decryptedURL)
     }
+
+    func testEncryptInPlacePreservesProtection() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent("protect_test.txt")
+        try testData.write(to: fileURL, options: .completeFileProtection)
+
+        let attrsBefore = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let protectionBefore = attrsBefore[.protectionKey] as? FileProtectionType
+
+        _ = try cryptoVault.encryptInPlace(fileURL: fileURL)
+
+        let attrsAfter = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let protectionAfter = attrsAfter[.protectionKey] as? FileProtectionType
+
+        XCTAssertEqual(protectionBefore, protectionAfter)
+
+        try? FileManager.default.removeItem(at: fileURL)
+    }
     
     // MARK: - Key Storage Tests
     

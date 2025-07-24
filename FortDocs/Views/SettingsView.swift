@@ -9,6 +9,17 @@ struct SettingsView: View {
     @State private var showingExportData = false
     @State private var showingDeleteAllData = false
     @State private var biometricsEnabled = false
+
+    private var autoLockDescription: String {
+        switch authService.autoLockTimeout {
+        case 0: return "Immediately"
+        case 60: return "After 1 Minute"
+        case 300: return "After 5 Minutes"
+        case 1800: return "After 30 Minutes"
+        case 3600: return "After 1 Hour"
+        default: return "Custom"
+        }
+    }
     
     var body: some View {
         NavigationView {
@@ -52,25 +63,27 @@ struct SettingsView: View {
                     }
                     .foregroundColor(.primary)
                     
-                    HStack {
-                        Image(systemName: "lock.shield")
-                            .foregroundColor(.green)
-                            .frame(width: 24)
-                        
-                        VStack(alignment: .leading) {
-                            Text("Auto-Lock")
-                                .font(.body)
-                            
-                            Text("Immediately")
+                    NavigationLink(destination: AutoLockSettingsView()) {
+                        HStack {
+                            Image(systemName: "lock.shield")
+                                .foregroundColor(.green)
+                                .frame(width: 24)
+
+                            VStack(alignment: .leading) {
+                                Text("Auto-Lock")
+                                    .font(.body)
+
+                                Text(autoLockDescription)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "chevron.right")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
-                        Spacer()
-                        
-                        Image(systemName: "chevron.right")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
                     }
                 }
                 

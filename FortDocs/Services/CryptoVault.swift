@@ -84,7 +84,9 @@ class CryptoVault: ObservableObject {
         
         // Replace original with encrypted version
         _ = try fileManager.replaceItem(at: fileURL, withItemAt: tempURL, backupItemName: nil, options: [], resultingItemURL: nil)
-        
+
+        try setFileProtection(for: fileURL)
+
         return fileURL.lastPathComponent
     }
     
@@ -221,6 +223,24 @@ class CryptoVault: ObservableObject {
                 DispatchQueue.main.async { completion(.failure(error)) }
             }
         }
+    }
+
+    // MARK: - String Helpers
+
+    func encryptString(_ string: String, documentID: String) throws -> String {
+        guard let masterKey = masterKey else { throw CryptoVaultError.masterKeyNotAvailable }
+        let key = try deriveDocumentKey(from: masterKey, documentID: documentID)
+        let data = Data(string.utf8)
+        let encrypted = try encryptData(data, with: key)
+        return encrypted.base64EncodedString()
+    }
+
+    func decryptString(_ base64: String, documentID: String) throws -> String {
+        guard let masterKey = masterKey else { throw CryptoVaultError.masterKeyNotAvailable }
+        let key = try deriveDocumentKey(from: masterKey, documentID: documentID)
+        guard let data = Data(base64Encoded: base64) else { throw CryptoVaultError.invalidEncryptedData }
+        let decrypted = try decryptData(data, with: key)
+        return String(decoding: decrypted, as: UTF8.self)
     }
     
     private func setFileProtection(for url: URL) throws {
